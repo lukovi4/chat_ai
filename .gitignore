@@ -1,0 +1,19 @@
+# Dart / Flutter
+.dart_tool/
+.packages
+build/
+.flutter-plugins-dependencies
+# Library package: lockfile is not committed (consumers resolve their own).
+pubspec.lock
+
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# OS cruft
+.DS_Store
+
+# NOTE: generated code (*.freezed.dart, *.g.dart) is intentionally NOT ignored.
+# This package ships as a git dependency, so its generated sources are committed
+# and consuming apps never run build_runner for it (V1_SPEC §0).

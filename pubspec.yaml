@@ -1,0 +1,27 @@
+name: chat_ai
+description: >-
+  A canonical Flutter chat-with-AI kit: one open conversation per session,
+  streaming replies over a pluggable backend, tool use, and chat widgets.
+  Private git dependency, not published.
+version: 0.1.0
+publish_to: none
+
+environment:
+  sdk: ^3.12.0
+  flutter: ">=3.44.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # Sealed unions + value models (codegen)
+  freezed_annotation: ^3.1.0
+  json_annotation: ^4.12.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+  build_runner: ^2.15.1
+  freezed: ^3.2.5
+  json_serializable: ^6.14.0
