@@ -17,7 +17,8 @@ import 'chat_request.dart';
 /// included, is a [BackendEvent] — see the event contract on [BackendEvent].
 ///
 /// Implementations:
-/// - `FirebaseChatBackend` (production, dio + SSE) — a later increment;
+/// - `FirebaseChatBackend` (production: dio + Firebase tokens + the internal
+///   SSE pipeline) — `firebase_chat_backend.dart`;
 /// - `FakeChatBackend` (tests, `package:chat_ai/testing.dart`) — a later
 ///   increment.
 abstract interface class ChatBackend {

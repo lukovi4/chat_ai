@@ -127,9 +127,14 @@ void main() {
       BackendEvent.providerState(ProviderOpaquePart('openai', Uint8List(0))),
       isA<ProviderStateEvent>(),
     );
-    // The interface is public; no concrete backend ships in this increment.
-    const ChatBackend? backend = null;
-    expect(backend, isNull);
+    // The production transport is public and assignable to the interface.
+    // Constructing it touches no Firebase/network — tokens are pulled per
+    // send, which this test never calls — and the URL constructor is the
+    // whole public configuration surface (V1_SPEC §8).
+    final ChatBackend backend = FirebaseChatBackend(
+      'https://example.invalid/chat',
+    );
+    expect(backend, isA<FirebaseChatBackend>());
   });
 
   test('the export boundary keeps internals and testing surface out', () {
@@ -140,6 +145,10 @@ void main() {
     // Internal helpers stay internal.
     expect(barrel.contains('conversation_invariants'), isFalse);
     expect(barrel.contains('utc_date_time_converter'), isFalse);
+    // The transport file is exported selectively: the class only — the
+    // internal test seam never reaches the public surface.
+    expect(barrel.contains('show FirebaseChatBackend'), isTrue);
+    expect(barrel.contains('firebaseChatBackendForTesting'), isFalse);
 
     // The testing entry exists but intentionally exports nothing yet:
     // FakeChatBackend is not part of the foundation increment.
