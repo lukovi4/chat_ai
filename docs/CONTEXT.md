@@ -53,10 +53,13 @@ Package owns the mechanism; the widget owns the rendering. Same spine as
 
 **Customization boundary** (the "mechanism, not policy" line, applied to UI):
 everything about **how it looks** is under the app's full control — colors,
-paddings, text styles, bubble shapes — carried by a **Chat Theme** config whose
+paddings, text styles, bubble shapes (a tail is just a custom shape; text
+color rides in the text styles) — carried by a **Chat Theme** config whose
 defaults derive from the app's `Theme`, so an unconfigured chat already matches
-the app's style. **How it is composed** is configurable only up to ready-made
-switches (e.g. bubble alignment, avatar visibility/side, timestamp position);
+the app's style; the exact field list, defaults and constraints are pinned in
+V1_SPEC.md §7. **How it is composed** is configurable only up to ready-made
+switches (a closed list in v1: own-bubble alignment, avatar visibility/side,
+timestamp position — V1_SPEC.md §7);
 arbitrary rearrangement is **not** a parameter — an app wanting a different
 layout replaces a part via a builder slot or composes its own screen from the
 exported parts (that is what they are exported for). This is the honest ceiling

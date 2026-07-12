@@ -637,57 +637,173 @@ with `toolCall + toolResult` (`toolCallId`, `content`, `isError`) — under a
 
 ## 7. Widgets — concrete configuration
 
-Visual behaviour is docs/widgets-spec.md; this pins the parameters. The one
-**required** parameter across all three widgets is `failureText` on the
-Message List — everything else has a working default ("codes out, strings
-never": the package ships zero user-facing strings).
+Visual behaviour is docs/widgets-spec.md; this pins the exact public surface.
+Required inputs: `session` on `ChatMessageList` and `ChatInputBar`, `message`
+on `MessageBubble`, and — only on `ChatMessageList` — `failureText`;
+everything else has a working default ("codes out, strings
+never": the package ships zero user-facing strings — no tooltips, no error
+texts; the only user-facing error text comes from the app's `failureText`, or
+the app's `errorBuilder` replaces the error row entirely).
+
+### Exact widget signatures
+
+Builder/callback typedefs are §3's, verbatim (`AvatarBuilder`,
+`ThinkingBuilder`, `ErrorBuilder`, `PartBuilder`, `EmptyReplyBuilder`,
+`OnAttach`, `OnMic`, `OnImageTap`).
 
 ```dart
-ChatMessageList(
-  session: session,                          // required
-  failureText: (FailureCause c) => …,        // required — the app's switch over 10 codes
-  theme: ChatTheme(…),                       // optional; defaults derive from Theme.of(context)
-  // layout switches (widgets-spec «Переключатели»):
-  ownMessagesRight: true,
-  showAvatars: false, avatarSide: …,
-  timestamps: TimestampPosition.none,
-  // builder slots (each nullable = default rendering):
-  avatarBuilder, thinkingBuilder, errorBuilder,
-  partBuilder,                               // visible ContentParts only; never providerOpaque
-  emptyReplyBuilder,                         // default: compact regenerate icon-button
-  onImageTap,                                // null = tap does nothing
-)
+enum AvatarSide { leading, trailing }
+enum TimestampPosition { none, belowBubble }
 
-MessageBubble(message: …, theme:, partBuilder:, onImageTap:)   // exported standalone
+const ChatMessageList({
+  Key? key,
+  required ChatSession session,
+  required String Function(FailureCause cause) failureText,
+  ChatTheme theme = const ChatTheme(),
+  bool ownMessagesRight = true,
+  bool showAvatars = false,
+  AvatarSide avatarSide = AvatarSide.leading,
+  TimestampPosition timestamps = TimestampPosition.none,
+  bool markdown = true,
+  AvatarBuilder? avatarBuilder,
+  ThinkingBuilder? thinkingBuilder,
+  ErrorBuilder? errorBuilder,
+  PartBuilder? partBuilder,
+  EmptyReplyBuilder? emptyReplyBuilder,   // default: compact regenerate icon-button
+  OnImageTap? onImageTap,                 // null = tap does nothing
+});
 
-ChatInputBar(
-  session: session,
-  hint: null,                                // null = empty placeholder, no default text
-  onAttach: null,                            // null = no attach button (app's picker otherwise)
-  onMic: null,                               // null = no mic button; result text is INSERTED, not sent
-  maxAttachments: null,                      // null = session.imageOptions limit;
-                                             // non-null may only LOWER that limit
-)
+const MessageBubble({                     // exported standalone
+  Key? key,
+  required Message message,
+  ChatTheme theme = const ChatTheme(),
+  bool markdown = true,
+  PartBuilder? partBuilder,
+  OnImageTap? onImageTap,
+});
+
+const ChatInputBar({
+  Key? key,
+  required ChatSession session,
+  ChatTheme theme = const ChatTheme(),
+  String? hint,             // null = empty placeholder, no default text
+  OnAttach? onAttach,       // null = no attach button (app's picker otherwise)
+  OnMic? onMic,             // null = no mic button; result text is INSERTED, not sent
+  int? maxAttachments,      // null = session.imageOptions limit; non-null must
+                            //   be > 0 and may only LOWER that limit
+});
 ```
 
-- `ChatTheme` is a plain immutable value class (colors, paddings,
-  `TextStyle`s, shapes, image-thumbnail size — the list in widgets-spec);
-  every field nullable, null = derived from the app `Theme`.
-- Built-in actions wire directly to the façade: send→stop toggle (`cancel`,
-  active in Sending/AwaitingTool/Streaming), resend button on a `failed` user
-  bubble (`resend(id)`), regenerate on an `interrupted` reply and on the
-  error row after a `Failed` with no assistant only when the last user Message
-  is `sent`; if that user Message is `failed`, the row calls `resend(id)`.
-  Assistant status `failed` does not exist (CONTEXT.md §Message Status). Copy
-  is on long-press. No retry logic in widgets — a button is one Core call.
-- The Input Bar owns its draft/controller internally. It awaits `onAttach` and
-  `onMic`; callback exceptions keep the draft and are reported through
-  `FlutterError`, not as a chat Failure. It clears the draft only when the
-  Core's private command disposition is `accepted`. Its effective attachment
-  cap is `min(local override, session.imageOptions.maxImagesPerMessage)`; the
-  Core re-checks the session cap for direct API calls.
-- Bot text renders via `gpt_markdown` by default (`markdown: false` → plain);
-  user text is always plain.
+### ChatTheme — exact fields and defaults
+
+`ChatTheme` is a plain immutable **const** value class; every field is
+nullable, null = derived from the app `Theme` at build time. There are **no**
+separate `userTextColor`/`assistantTextColor` fields (text color rides in the
+`TextStyle`s) and no tail/animation/icon/controller/scroll fields — a bubble
+tail is a custom `ShapeBorder`.
+
+| Field | null default |
+|---|---|
+| `Color? backgroundColor` | `colorScheme.surface` |
+| `Color? userBubbleColor` | `colorScheme.primaryContainer` |
+| `Color? assistantBubbleColor` | `colorScheme.surfaceContainerHighest` |
+| `Color? iconColor` | `colorScheme.onSurfaceVariant` |
+| `Color? errorColor` | `colorScheme.error` |
+| `Color? inputFillColor` | `colorScheme.surfaceContainerHighest` |
+| `EdgeInsetsGeometry? messageListPadding` | `EdgeInsets.all(12)` |
+| `EdgeInsetsGeometry? bubblePadding` | `EdgeInsets.symmetric(horizontal: 12, vertical: 8)` |
+| `EdgeInsetsGeometry? inputBarPadding` | `EdgeInsets.all(8)` |
+| `double? messageSpacing` | `8` |
+| `TextStyle? userTextStyle` | `textTheme.bodyMedium` + `colorScheme.onPrimaryContainer` |
+| `TextStyle? assistantTextStyle` | `textTheme.bodyMedium` + `colorScheme.onSurface` |
+| `TextStyle? timestampTextStyle` | `textTheme.bodySmall` + `colorScheme.onSurfaceVariant` |
+| `TextStyle? errorTextStyle` | `textTheme.bodySmall` + `colorScheme.error` |
+| `TextStyle? inputTextStyle` | `textTheme.bodyLarge` + `colorScheme.onSurface` |
+| `TextStyle? hintTextStyle` | `textTheme.bodyLarge` + `colorScheme.onSurfaceVariant` |
+| `ShapeBorder? userBubbleShape` | `RoundedRectangleBorder`, radius 16 |
+| `ShapeBorder? assistantBubbleShape` | `RoundedRectangleBorder`, radius 16 |
+| `double? maxBubbleWidthFactor` | `0.8` of the available width |
+| `Size? imageThumbnailSize` | `Size(160, 160)` |
+
+Constraints — a violation throws **`ArgumentError` during widget build, before
+rendering or invoking any callback**, with identical behaviour in debug and
+release; it is never a debug-only `assert` or a silent clamp:
+`0 < maxBubbleWidthFactor <= 1`; `messageSpacing >= 0`;
+`imageThumbnailSize.width`/`height > 0`; a non-null `maxAttachments > 0`.
+
+### Responsibility boundaries
+
+- **MessageBubble** renders exactly one `Message` — its visible ContentParts
+  and status markers — and implements Copy. It does not hold a `ChatSession`
+  and never shows the failure row, the thinking placeholder, resend/regenerate
+  or the empty-reply action; a `complete` assistant Message with no visible
+  content draws no bubble at all. A `system` Message renders as plain text in
+  the assistant visual style, left-aligned.
+- **ChatMessageList** subscribes to `session.states` and `session.tokens` and
+  reads `session.snapshot`; it owns the thinking placeholder, the failure row,
+  the resend/regenerate actions and the empty-reply action.
+- **ChatInputBar** owns its draft and image previews; `ChatTheme` styles it
+  too. No public controller/focus/keyboard or scroll APIs in v1.
+
+**Part rendering chain**: `TextPart`/`ImagePart`/`ToolCallPart`/
+`ToolResultPart` are offered to `partBuilder` first; a null return means the
+default rendering (the tool parts' default is hidden). `ProviderOpaquePart`
+is never rendered **and never passed to `partBuilder`**.
+
+### Built-in actions
+
+Wired directly to the façade — a button is one Core call, no retry logic in
+widgets:
+
+- send→stop toggle (`cancel`), active in Sending/AwaitingTool/Streaming;
+- resend button **only when the last Message of the conversation is a `failed`
+  user Message** (`resend(id)`); an older `failed` user Message gets no button
+  (resend there is a Core no-op, §4);
+- regenerate on an `interrupted` reply and on the empty-`complete`-reply
+  action; on the error row after a `Failed` with no assistant only when the
+  last user Message is `sent` — if that user Message is `failed`, the row
+  shows resend instead. A `complete` reply with visible content gets no
+  regenerate. Assistant status `failed` does not exist (CONTEXT.md §Message
+  Status);
+- Copy on long-press: joins the Message's visible `TextPart`s in order with
+  `"\n"`, source text as-is (markdown included); image/tool/opaque parts are
+  never copied; no visible text = Copy is a no-op.
+
+### Markdown, timestamps, scroll
+
+- `markdown` exists on exactly two widgets — `ChatMessageList` and
+  `MessageBubble` — default `true`; it applies **only to assistant
+  `TextPart`s** (rendered via `gpt_markdown`; `markdown: false` → plain).
+  User and system text is always plain.
+- `TimestampPosition.none` shows nothing; `belowBubble` shows the Message's
+  `createdAt` in local time, formatted per the ambient Flutter/Material
+  locale.
+- The list stays glued to the bottom on new Messages/tokens **only if the
+  user was already at the bottom**; a user who scrolled up is never pulled
+  back down by streaming.
+
+### Input Bar behaviour
+
+- Effective attachment cap = `min(maxAttachments,
+  session.imageOptions.maxImagesPerMessage)`; the Core re-checks its own cap
+  for direct API calls. Repeated attaches add images up to the cap; a callback
+  returning more than the remaining slots keeps the first images in source
+  order up to the cap; `[]` = user cancelled the picker, nothing changes.
+- `onAttach`/`onMic` are awaited; a callback exception keeps draft/previews
+  and is reported through `FlutterError`, never as a chat Failure. `onMic`
+  returning null changes nothing; a non-empty result is inserted at the
+  current selection (replacing it) with the cursor placed after the insert —
+  mic never sends automatically.
+- Draft and previews are cleared only on the Core's private `accepted`
+  disposition; `noOp`/`rejected` keep both (§3).
+
+### Default Material icons (no strings)
+
+send `Icons.send` · stop `Icons.stop` · attach `Icons.attach_file` · mic
+`Icons.mic` · remove preview `Icons.close` · resend / regenerate /
+empty-reply regenerate `Icons.refresh` · failure `Icons.error_outline` ·
+interrupted `Icons.stop_circle_outlined` · default avatar `Icons.person`.
+No tooltips and no other built-in user-facing strings.
 
 ## 8. AI Backend interface + Firebase adapter
 
@@ -884,9 +1000,19 @@ Against `FakeChatBackend` unless noted:
     post-resize payload >10 MB gives rejected `contextTooLong` before backend;
     edit/resend preserves processed ImageParts without re-resize.
 13. **Widgets**: all states render; no built-in user-facing string; action is
-    chosen by history (`resend` for failed user, `regenerate` for sent user
-    without assistant or interrupted assistant); `onAttach`/`onMic` errors go
-    to `FlutterError` and preserve draft; buttons invoke one Core command.
+    chosen by history (`resend` only when the LAST Message is a `failed` user;
+    `regenerate` for a `sent` final user without assistant, an `interrupted`
+    assistant and the empty `complete` reply; a `complete` reply with visible
+    content gets none); `ChatTheme`/`maxAttachments` constraint violations
+    throw `ArgumentError` during build before rendering/callbacks, identically
+    in debug/release (never an assert-only guard or clamp); `partBuilder` receives
+    text/image parts and hidden tool parts but never `ProviderOpaquePart`;
+    `markdown` affects only assistant TextParts on the two widgets exposing
+    it; Copy joins visible TextParts with `"\n"` and no-ops without text; the
+    list sticks to the bottom only when the user was already there;
+    `onAttach`/`onMic` errors go to `FlutterError` and preserve
+    draft/previews; over-cap attach keeps the first images up to the cap; mic
+    inserts at the selection and never sends; buttons invoke one Core command.
 14. **Context/system mapping**: failed users excluded, interrupted partials
     included, empty complete replies omitted from provider wire, image-only
     sends; BotProfile prompt precedes chronological persisted system Messages,
