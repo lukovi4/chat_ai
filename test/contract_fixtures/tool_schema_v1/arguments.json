@@ -1,0 +1,235 @@
+{
+  "cases": [
+    {
+      "case": "full dialect instance checks",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "period": {
+            "type": "string",
+            "description": "YYYY-MM"
+          },
+          "limit": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "plant",
+                "mood"
+              ]
+            }
+          },
+          "filter": {
+            "type": "object",
+            "properties": {
+              "strict": {
+                "type": "boolean"
+              },
+              "weight": {
+                "type": "number"
+              }
+            },
+            "required": [
+              "strict",
+              "weight"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "filter",
+          "limit",
+          "period",
+          "tags"
+        ],
+        "additionalProperties": false
+      },
+      "valid": [
+        {
+          "period": "2026-06",
+          "limit": null,
+          "tags": [
+            "plant"
+          ],
+          "filter": {
+            "strict": true,
+            "weight": 0.5
+          }
+        },
+        {
+          "period": "2026-06",
+          "limit": 3,
+          "tags": [],
+          "filter": {
+            "strict": false,
+            "weight": 7
+          }
+        }
+      ],
+      "invalid": [
+        {
+          "period": "2026-06",
+          "limit": 3,
+          "tags": [
+            "weather"
+          ],
+          "filter": {
+            "strict": false,
+            "weight": 1
+          }
+        },
+        {
+          "period": "2026-06",
+          "limit": 3,
+          "tags": "plant",
+          "filter": {
+            "strict": false,
+            "weight": 1
+          }
+        },
+        {
+          "period": "2026-06",
+          "limit": 3,
+          "tags": [],
+          "filter": {
+            "strict": "yes",
+            "weight": 1
+          }
+        },
+        "not an object"
+      ]
+    },
+    {
+      "case": "JSON number semantics: integer is any whole-valued number, null stays distinct",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "i": {
+            "type": "integer"
+          },
+          "n": {
+            "type": "number"
+          },
+          "z": {
+            "type": "null"
+          }
+        },
+        "required": [
+          "i",
+          "n",
+          "z"
+        ],
+        "additionalProperties": false
+      },
+      "valid": [
+        {
+          "i": 5,
+          "n": 0.5,
+          "z": null
+        },
+        {
+          "i": 5,
+          "n": 7,
+          "z": null
+        },
+        {
+          "i": 5.0,
+          "n": 1,
+          "z": null
+        }
+      ],
+      "invalid": [
+        {
+          "i": 5.5,
+          "n": 1,
+          "z": null
+        },
+        {
+          "i": 5,
+          "n": 1,
+          "z": 0
+        },
+        {
+          "i": null,
+          "n": 1,
+          "z": null
+        },
+        {
+          "i": true,
+          "n": 1,
+          "z": null
+        }
+      ]
+    },
+    {
+      "case": "nullable pair takes both sides, still no fractions for integer",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "v": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "v"
+        ],
+        "additionalProperties": false
+      },
+      "valid": [
+        {
+          "v": null
+        },
+        {
+          "v": 3
+        },
+        {
+          "v": 3.0
+        }
+      ],
+      "invalid": [
+        {
+          "v": 3.5
+        },
+        {
+          "v": "three"
+        }
+      ]
+    },
+    {
+      "case": "closed object: unknown and missing keys fail",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "q": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "q"
+        ],
+        "additionalProperties": false
+      },
+      "valid": [
+        {
+          "q": "x"
+        }
+      ],
+      "invalid": [
+        {
+          "q": "x",
+          "extra": 1
+        },
+        {}
+      ]
+    }
+  ]
+}

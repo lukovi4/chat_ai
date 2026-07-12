@@ -1,0 +1,1486 @@
+{
+  "accepted": [
+    {
+      "case": "full v1 dialect: scalars, nullable pair, enum array items, nested object",
+      "tools": [
+        {
+          "name": "searchNotes",
+          "description": "d",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "period": {
+                "type": "string",
+                "description": "YYYY-MM"
+              },
+              "limit": {
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "tags": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "enum": [
+                    "plant",
+                    "mood"
+                  ]
+                }
+              },
+              "filter": {
+                "type": "object",
+                "properties": {
+                  "strict": {
+                    "type": "boolean"
+                  },
+                  "weight": {
+                    "type": "number"
+                  }
+                },
+                "required": [
+                  "strict",
+                  "weight"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "filter",
+              "limit",
+              "period",
+              "tags"
+            ],
+            "additionalProperties": false
+          }
+        }
+      ]
+    },
+    {
+      "case": "empty-args tool (object with no properties)",
+      "tools": [
+        {
+          "name": "searchNotes",
+          "description": "d",
+          "parameters": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+            "additionalProperties": false
+          }
+        }
+      ]
+    },
+    {
+      "case": "regex name forms and a 64-char name are legal",
+      "tools": [
+        {
+          "name": "A-Za-z0-9_-ok",
+          "description": "d",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "period": {
+                "type": "string",
+                "description": "YYYY-MM"
+              },
+              "limit": {
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "tags": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "enum": [
+                    "plant",
+                    "mood"
+                  ]
+                }
+              },
+              "filter": {
+                "type": "object",
+                "properties": {
+                  "strict": {
+                    "type": "boolean"
+                  },
+                  "weight": {
+                    "type": "number"
+                  }
+                },
+                "required": [
+                  "strict",
+                  "weight"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "filter",
+              "limit",
+              "period",
+              "tags"
+            ],
+            "additionalProperties": false
+          }
+        },
+        {
+          "name": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+          "description": "d",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "period": {
+                "type": "string",
+                "description": "YYYY-MM"
+              },
+              "limit": {
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "tags": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "enum": [
+                    "plant",
+                    "mood"
+                  ]
+                }
+              },
+              "filter": {
+                "type": "object",
+                "properties": {
+                  "strict": {
+                    "type": "boolean"
+                  },
+                  "weight": {
+                    "type": "number"
+                  }
+                },
+                "required": [
+                  "strict",
+                  "weight"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "filter",
+              "limit",
+              "period",
+              "tags"
+            ],
+            "additionalProperties": false
+          }
+        }
+      ]
+    },
+    {
+      "case": "nullable object and nullable array properties",
+      "tools": [
+        {
+          "name": "searchNotes",
+          "description": "d",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "meta": {
+                "type": [
+                  "object",
+                  "null"
+                ],
+                "properties": {
+                  "k": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "k"
+                ],
+                "additionalProperties": false
+              },
+              "xs": {
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "items": {
+                  "type": "integer"
+                }
+              }
+            },
+            "required": [
+              "meta",
+              "xs"
+            ],
+            "additionalProperties": false
+          }
+        }
+      ]
+    },
+    {
+      "case": "nullable enum includes null",
+      "tools": [
+        {
+          "name": "searchNotes",
+          "description": "d",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "v": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "enum": [
+                  "a",
+                  null
+                ]
+              }
+            },
+            "required": [
+              "v"
+            ],
+            "additionalProperties": false
+          }
+        }
+      ]
+    },
+    {
+      "case": "integer enum may use whole-valued JSON numbers",
+      "tools": [
+        {
+          "name": "searchNotes",
+          "description": "d",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "v": {
+                "type": "integer",
+                "enum": [
+                  1,
+                  2.0
+                ]
+              }
+            },
+            "required": [
+              "v"
+            ],
+            "additionalProperties": false
+          }
+        }
+      ]
+    }
+  ],
+  "rejected": [
+    {
+      "case": "name with a space",
+      "tools": [
+        {
+          "name": "bad name",
+          "description": "d",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "period": {
+                "type": "string",
+                "description": "YYYY-MM"
+              },
+              "limit": {
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "tags": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "enum": [
+                    "plant",
+                    "mood"
+                  ]
+                }
+              },
+              "filter": {
+                "type": "object",
+                "properties": {
+                  "strict": {
+                    "type": "boolean"
+                  },
+                  "weight": {
+                    "type": "number"
+                  }
+                },
+                "required": [
+                  "strict",
+                  "weight"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "filter",
+              "limit",
+              "period",
+              "tags"
+            ],
+            "additionalProperties": false
+          }
+        }
+      ]
+    },
+    {
+      "case": "empty name",
+      "tools": [
+        {
+          "name": "",
+          "description": "d",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "period": {
+                "type": "string",
+                "description": "YYYY-MM"
+              },
+              "limit": {
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "tags": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "enum": [
+                    "plant",
+                    "mood"
+                  ]
+                }
+              },
+              "filter": {
+                "type": "object",
+                "properties": {
+                  "strict": {
+                    "type": "boolean"
+                  },
+                  "weight": {
+                    "type": "number"
+                  }
+                },
+                "required": [
+                  "strict",
+                  "weight"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "filter",
+              "limit",
+              "period",
+              "tags"
+            ],
+            "additionalProperties": false
+          }
+        }
+      ]
+    },
+    {
+      "case": "65-char name",
+      "tools": [
+        {
+          "name": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+          "description": "d",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "period": {
+                "type": "string",
+                "description": "YYYY-MM"
+              },
+              "limit": {
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "tags": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "enum": [
+                    "plant",
+                    "mood"
+                  ]
+                }
+              },
+              "filter": {
+                "type": "object",
+                "properties": {
+                  "strict": {
+                    "type": "boolean"
+                  },
+                  "weight": {
+                    "type": "number"
+                  }
+                },
+                "required": [
+                  "strict",
+                  "weight"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "filter",
+              "limit",
+              "period",
+              "tags"
+            ],
+            "additionalProperties": false
+          }
+        }
+      ]
+    },
+    {
+      "case": "duplicate names inside one profile",
+      "tools": [
+        {
+          "name": "twin",
+          "description": "d",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "period": {
+                "type": "string",
+                "description": "YYYY-MM"
+              },
+              "limit": {
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "tags": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "enum": [
+                    "plant",
+                    "mood"
+                  ]
+                }
+              },
+              "filter": {
+                "type": "object",
+                "properties": {
+                  "strict": {
+                    "type": "boolean"
+                  },
+                  "weight": {
+                    "type": "number"
+                  }
+                },
+                "required": [
+                  "strict",
+                  "weight"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "filter",
+              "limit",
+              "period",
+              "tags"
+            ],
+            "additionalProperties": false
+          }
+        },
+        {
+          "name": "twin",
+          "description": "d",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "period": {
+                "type": "string",
+                "description": "YYYY-MM"
+              },
+              "limit": {
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "tags": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "enum": [
+                    "plant",
+                    "mood"
+                  ]
+                }
+              },
+              "filter": {
+                "type": "object",
+                "properties": {
+                  "strict": {
+                    "type": "boolean"
+                  },
+                  "weight": {
+                    "type": "number"
+                  }
+                },
+                "required": [
+                  "strict",
+                  "weight"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "filter",
+              "limit",
+              "period",
+              "tags"
+            ],
+            "additionalProperties": false
+          }
+        }
+      ]
+    },
+    {
+      "case": "root is not an object",
+      "tools": [
+        {
+          "name": "searchNotes",
+          "description": "d",
+          "parameters": {
+            "type": "string"
+          }
+        }
+      ]
+    },
+    {
+      "case": "root must not be nullable",
+      "tools": [
+        {
+          "name": "searchNotes",
+          "description": "d",
+          "parameters": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {},
+            "required": [],
+            "additionalProperties": false
+          }
+        }
+      ]
+    },
+    {
+      "case": "object without properties/required/additionalProperties",
+      "tools": [
+        {
+          "name": "searchNotes",
+          "description": "d",
+          "parameters": {
+            "type": "object"
+          }
+        }
+      ]
+    },
+    {
+      "case": "required misses a declared property",
+      "tools": [
+        {
+          "name": "searchNotes",
+          "description": "d",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "a": {
+                "type": "string"
+              },
+              "b": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "a"
+            ],
+            "additionalProperties": false
+          }
+        }
+      ]
+    },
+    {
+      "case": "required invents an undeclared name",
+      "tools": [
+        {
+          "name": "searchNotes",
+          "description": "d",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "a": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "a",
+              "ghost"
+            ],
+            "additionalProperties": false
+          }
+        }
+      ]
+    },
+    {
+      "case": "additionalProperties: true",
+      "tools": [
+        {
+          "name": "searchNotes",
+          "description": "d",
+          "parameters": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+            "additionalProperties": true
+          }
+        }
+      ]
+    },
+    {
+      "case": "schema-valued additionalProperties",
+      "tools": [
+        {
+          "name": "searchNotes",
+          "description": "d",
+          "parameters": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+            "additionalProperties": {
+              "type": "string"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "case": "array without items",
+      "tools": [
+        {
+          "name": "searchNotes",
+          "description": "d",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "xs": {
+                "type": "array"
+              }
+            },
+            "required": [
+              "xs"
+            ],
+            "additionalProperties": false
+          }
+        }
+      ]
+    },
+    {
+      "case": "tuple-style items list",
+      "tools": [
+        {
+          "name": "searchNotes",
+          "description": "d",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "xs": {
+                "type": "array",
+                "items": [
+                  {
+                    "type": "string"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "xs"
+            ],
+            "additionalProperties": false
+          }
+        }
+      ]
+    },
+    {
+      "case": "enum incompatible with the declared type",
+      "tools": [
+        {
+          "name": "searchNotes",
+          "description": "d",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "v": {
+                "type": "integer",
+                "enum": [
+                  1,
+                  "two"
+                ]
+              }
+            },
+            "required": [
+              "v"
+            ],
+            "additionalProperties": false
+          }
+        }
+      ]
+    },
+    {
+      "case": "fractional number in an integer enum",
+      "tools": [
+        {
+          "name": "searchNotes",
+          "description": "d",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "v": {
+                "type": "integer",
+                "enum": [
+                  1,
+                  2.5
+                ]
+              }
+            },
+            "required": [
+              "v"
+            ],
+            "additionalProperties": false
+          }
+        }
+      ]
+    },
+    {
+      "case": "null enum value on a non-nullable type",
+      "tools": [
+        {
+          "name": "searchNotes",
+          "description": "d",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "v": {
+                "type": "string",
+                "enum": [
+                  "a",
+                  null
+                ]
+              }
+            },
+            "required": [
+              "v"
+            ],
+            "additionalProperties": false
+          }
+        }
+      ]
+    },
+    {
+      "case": "enum on a compound type",
+      "tools": [
+        {
+          "name": "searchNotes",
+          "description": "d",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "v": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "enum": [
+                  1
+                ]
+              }
+            },
+            "required": [
+              "v"
+            ],
+            "additionalProperties": false
+          }
+        }
+      ]
+    },
+    {
+      "case": "nullable pair in the wrong order",
+      "tools": [
+        {
+          "name": "searchNotes",
+          "description": "d",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "v": {
+                "type": [
+                  "null",
+                  "string"
+                ]
+              }
+            },
+            "required": [
+              "v"
+            ],
+            "additionalProperties": false
+          }
+        }
+      ]
+    },
+    {
+      "case": "two non-null types are not a nullable pair",
+      "tools": [
+        {
+          "name": "searchNotes",
+          "description": "d",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "v": {
+                "type": [
+                  "string",
+                  "integer"
+                ]
+              }
+            },
+            "required": [
+              "v"
+            ],
+            "additionalProperties": false
+          }
+        }
+      ]
+    },
+    {
+      "case": "three-entry type list",
+      "tools": [
+        {
+          "name": "searchNotes",
+          "description": "d",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "v": {
+                "type": [
+                  "string",
+                  "null",
+                  "integer"
+                ]
+              }
+            },
+            "required": [
+              "v"
+            ],
+            "additionalProperties": false
+          }
+        }
+      ]
+    },
+    {
+      "case": "empty type list",
+      "tools": [
+        {
+          "name": "searchNotes",
+          "description": "d",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "v": {
+                "type": []
+              }
+            },
+            "required": [
+              "v"
+            ],
+            "additionalProperties": false
+          }
+        }
+      ]
+    },
+    {
+      "case": "unknown type name",
+      "tools": [
+        {
+          "name": "searchNotes",
+          "description": "d",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "v": {
+                "type": "uuid"
+              }
+            },
+            "required": [
+              "v"
+            ],
+            "additionalProperties": false
+          }
+        }
+      ]
+    },
+    {
+      "case": "missing type",
+      "tools": [
+        {
+          "name": "searchNotes",
+          "description": "d",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "v": {
+                "description": "no type"
+              }
+            },
+            "required": [
+              "v"
+            ],
+            "additionalProperties": false
+          }
+        }
+      ]
+    },
+    {
+      "case": "invalid nested object",
+      "tools": [
+        {
+          "name": "searchNotes",
+          "description": "d",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "outer": {
+                "type": "object",
+                "properties": {
+                  "inner": {
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "inner"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "outer"
+            ],
+            "additionalProperties": false
+          }
+        }
+      ]
+    },
+    {
+      "case": "invalid nested array items",
+      "tools": [
+        {
+          "name": "searchNotes",
+          "description": "d",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "xs": {
+                "type": "array",
+                "items": {
+                  "type": "array"
+                }
+              }
+            },
+            "required": [
+              "xs"
+            ],
+            "additionalProperties": false
+          }
+        }
+      ]
+    },
+    {
+      "case": "object keywords on a scalar",
+      "tools": [
+        {
+          "name": "searchNotes",
+          "description": "d",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "v": {
+                "type": "string",
+                "properties": {}
+              }
+            },
+            "required": [
+              "v"
+            ],
+            "additionalProperties": false
+          }
+        }
+      ]
+    },
+    {
+      "case": "items on a non-array",
+      "tools": [
+        {
+          "name": "searchNotes",
+          "description": "d",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "v": {
+                "type": "string",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "required": [
+              "v"
+            ],
+            "additionalProperties": false
+          }
+        }
+      ]
+    },
+    {
+      "case": "non-string description",
+      "tools": [
+        {
+          "name": "searchNotes",
+          "description": "d",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "v": {
+                "type": "string",
+                "description": 5
+              }
+            },
+            "required": [
+              "v"
+            ],
+            "additionalProperties": false
+          }
+        }
+      ]
+    },
+    {
+      "case": "keyword outside the v1 dialect: $schema",
+      "tools": [
+        {
+          "name": "searchNotes",
+          "description": "d",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "q": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "q"
+            ],
+            "additionalProperties": false,
+            "$schema": true
+          }
+        }
+      ]
+    },
+    {
+      "case": "keyword outside the v1 dialect: $id",
+      "tools": [
+        {
+          "name": "searchNotes",
+          "description": "d",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "q": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "q"
+            ],
+            "additionalProperties": false,
+            "$id": true
+          }
+        }
+      ]
+    },
+    {
+      "case": "keyword outside the v1 dialect: $ref",
+      "tools": [
+        {
+          "name": "searchNotes",
+          "description": "d",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "q": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "q"
+            ],
+            "additionalProperties": false,
+            "$ref": true
+          }
+        }
+      ]
+    },
+    {
+      "case": "keyword outside the v1 dialect: $defs",
+      "tools": [
+        {
+          "name": "searchNotes",
+          "description": "d",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "q": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "q"
+            ],
+            "additionalProperties": false,
+            "$defs": true
+          }
+        }
+      ]
+    },
+    {
+      "case": "keyword outside the v1 dialect: const",
+      "tools": [
+        {
+          "name": "searchNotes",
+          "description": "d",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "q": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "q"
+            ],
+            "additionalProperties": false,
+            "const": true
+          }
+        }
+      ]
+    },
+    {
+      "case": "keyword outside the v1 dialect: default",
+      "tools": [
+        {
+          "name": "searchNotes",
+          "description": "d",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "q": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "q"
+            ],
+            "additionalProperties": false,
+            "default": true
+          }
+        }
+      ]
+    },
+    {
+      "case": "keyword outside the v1 dialect: oneOf",
+      "tools": [
+        {
+          "name": "searchNotes",
+          "description": "d",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "q": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "q"
+            ],
+            "additionalProperties": false,
+            "oneOf": true
+          }
+        }
+      ]
+    },
+    {
+      "case": "keyword outside the v1 dialect: anyOf",
+      "tools": [
+        {
+          "name": "searchNotes",
+          "description": "d",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "q": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "q"
+            ],
+            "additionalProperties": false,
+            "anyOf": true
+          }
+        }
+      ]
+    },
+    {
+      "case": "keyword outside the v1 dialect: allOf",
+      "tools": [
+        {
+          "name": "searchNotes",
+          "description": "d",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "q": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "q"
+            ],
+            "additionalProperties": false,
+            "allOf": true
+          }
+        }
+      ]
+    },
+    {
+      "case": "keyword outside the v1 dialect: not",
+      "tools": [
+        {
+          "name": "searchNotes",
+          "description": "d",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "q": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "q"
+            ],
+            "additionalProperties": false,
+            "not": true
+          }
+        }
+      ]
+    },
+    {
+      "case": "keyword outside the v1 dialect: if",
+      "tools": [
+        {
+          "name": "searchNotes",
+          "description": "d",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "q": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "q"
+            ],
+            "additionalProperties": false,
+            "if": true
+          }
+        }
+      ]
+    },
+    {
+      "case": "keyword outside the v1 dialect: pattern",
+      "tools": [
+        {
+          "name": "searchNotes",
+          "description": "d",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "q": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "q"
+            ],
+            "additionalProperties": false,
+            "pattern": true
+          }
+        }
+      ]
+    },
+    {
+      "case": "keyword outside the v1 dialect: format",
+      "tools": [
+        {
+          "name": "searchNotes",
+          "description": "d",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "q": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "q"
+            ],
+            "additionalProperties": false,
+            "format": true
+          }
+        }
+      ]
+    },
+    {
+      "case": "keyword outside the v1 dialect: minLength",
+      "tools": [
+        {
+          "name": "searchNotes",
+          "description": "d",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "q": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "q"
+            ],
+            "additionalProperties": false,
+            "minLength": true
+          }
+        }
+      ]
+    },
+    {
+      "case": "keyword outside the v1 dialect: maximum",
+      "tools": [
+        {
+          "name": "searchNotes",
+          "description": "d",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "q": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "q"
+            ],
+            "additionalProperties": false,
+            "maximum": true
+          }
+        }
+      ]
+    },
+    {
+      "case": "keyword outside the v1 dialect: minItems",
+      "tools": [
+        {
+          "name": "searchNotes",
+          "description": "d",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "q": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "q"
+            ],
+            "additionalProperties": false,
+            "minItems": true
+          }
+        }
+      ]
+    },
+    {
+      "case": "keyword outside the v1 dialect: uniqueItems",
+      "tools": [
+        {
+          "name": "searchNotes",
+          "description": "d",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "q": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "q"
+            ],
+            "additionalProperties": false,
+            "uniqueItems": true
+          }
+        }
+      ]
+    },
+    {
+      "case": "keyword outside the v1 dialect: patternProperties",
+      "tools": [
+        {
+          "name": "searchNotes",
+          "description": "d",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "q": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "q"
+            ],
+            "additionalProperties": false,
+            "patternProperties": true
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -150,9 +150,19 @@ void main() {
     expect(barrel.contains('show FirebaseChatBackend'), isTrue);
     expect(barrel.contains('firebaseChatBackendForTesting'), isFalse);
 
-    // The testing entry exists but intentionally exports nothing yet:
-    // FakeChatBackend is not part of the foundation increment.
+    // The Core façade is exported selectively too: the session + checkpoint
+    // typedef only — the command-disposition bridge and the internal test
+    // seam never reach the public surface (V1_SPEC §3).
+    expect(barrel.contains('show ChatSession, ConversationCheckpoint'), isTrue);
+    expect(barrel.contains('chatSessionForTesting'), isFalse);
+    expect(barrel.contains('sendWithDisposition'), isFalse);
+    expect(barrel.contains('ChatCommandDisposition'), isFalse);
+
+    // The testing entry exports exactly the scriptable fake (V1_SPEC §10) —
+    // no capture seam, and never re-exported from the main barrel.
     final testing = File('lib/testing.dart').readAsStringSync();
-    expect(testing.contains('export '), isFalse);
+    expect(testing.contains('show FakeChatBackend'), isTrue);
+    expect(testing.contains('capturedRequestsOf'), isFalse);
+    expect(barrel.contains('FakeChatBackend'), isFalse);
   });
 }

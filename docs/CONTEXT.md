@@ -619,6 +619,13 @@ call, always explicit). Resend follows the Retry Boundary's "before the first
 token" side; it carries the same Idempotency-Key so a resent message that *did*
 quietly arrive isn't processed twice.
 
+**Resend applies only to the LAST Message of the conversation.** An older
+`failed` user message with later history after it is a full no-op: nothing is
+truncated, no state changes, no key/checkpoint/backend work happens. Resend
+never rewrites history — restarting the conversation from an earlier point is
+the explicit truncate-and-resend mechanism (editAndResend), a deliberate
+command, never a side effect of retrying an old send.
+
 **No in-flight status survives a restart.** When the app hands a stored
 conversation back to the Core (the load half of the round trip, see Conversation
 Scope), the Core **normalises stale in-flight statuses itself** — they cannot be
@@ -726,7 +733,10 @@ original stops being wasted traffic and money. `maxImagesPerMessage` defaults to
 **4** and is enforced by the Core for every entry path; the Input Bar reads the
 same session setting (a widget-local override may only lower it). An image **with
 no text at all is a valid Message**. The numbers are code defaults (mechanism);
-the app tunes them (policy).
+the app tunes them (policy) within loud exact bounds: the long edge and the
+per-message count must be positive and JPEG quality must lie in 1..100
+inclusive — anything outside is a configuration error (`ArgumentError` at
+session construction), never a silent clamp.
 
 The Package is **chat-only**: it does **not** store images, manage a media library,
 upload to Cloud Storage, or encrypt anything. Images the user keeps or uploads

@@ -79,6 +79,15 @@ header. No market leader derives the key from request content.
   of a live owner and indefinite joining of a dead one without adding a lease
   service, queue or background worker.
 
+## Amendment (2026-07-12, resend scope)
+
+- **Resend is legal only while the `failed` user Message is the LAST Message
+  of the conversation.** An older `failed` user Message with later history is
+  a full no-op: no truncation, no state change, no new UUID, no
+  checkpoint/backend call. For the legal case nothing here changes: the
+  resend still carries the **persisted** `attemptKey`, and an explicit
+  `409`/`410` still gets its single automatic fresh-key fallback.
+
 ## Amendment (2026-07-10, final money/replay hardening)
 
 - Provider SDK automatic retries are disabled. A key may be released only for

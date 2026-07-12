@@ -131,10 +131,16 @@ session.editAndResend(id, newText);  // fresh key; truncates the conversation
                                      //   §Regenerate/Edit); keeps the original
                                      //   ImageParts untouched (no re-resize),
                                      //   replaces the text parts; no built-in UI
-session.resend(id);                  // failed user Message: SAME persisted
-                                     //   attemptKey (safe side of the Retry
-                                     //   Boundary); on 410/409 → one fresh-key
-                                     //   re-run (explicit command)
+session.resend(id);                  // failed user Message, ONLY while it is
+                                     //   the LAST Message of the conversation:
+                                     //   SAME persisted attemptKey (safe side
+                                     //   of the Retry Boundary); on 410/409 →
+                                     //   one fresh-key re-run (explicit
+                                     //   command). An older failed user with
+                                     //   later history is a full no-op —
+                                     //   resend never truncates; restarting
+                                     //   from an earlier point is
+                                     //   editAndResend's job
 session.cancel();                    // wire-cancel → Cancelled, keep-partial;
                                      //   upstream abort is best-effort (§3 contract)
 
@@ -264,7 +270,7 @@ name/schema; constructor/setter, §3/§5).
 | `send` | ✅ → Sending | no-op | no-op | no-op | ✅ → Sending |
 | `send` with empty text **and** no images | no-op everywhere (nothing to send) | | | | |
 | `regenerate` | ✅ for a bot reply, or for the final `sent` user Message with no assistant after it; else no-op | no-op | no-op | no-op | same rule |
-| `resend(id)` | ✅ if `id` is a `failed` **user** Message, else no-op | no-op | no-op | no-op | same rule |
+| `resend(id)` | ✅ if `id` is a `failed` **user** Message **and the last Message of the conversation**; an older `failed` user with later Messages is a full no-op (no truncation, no state change, no key/checkpoint/backend) | no-op | no-op | no-op | same rule |
 | `editAndResend(id, …)` | ✅ if `id` is a user Message, else no-op | no-op | no-op | no-op | same rule |
 | `cancel` | no-op | ✅ → Cancelled (no bot Message created) | ✅ → Cancelled (keep partial) | ✅ → Cancelled (keep partial) | no-op — **Done wins** the race (CONTEXT.md §Cancel) |
 
@@ -472,13 +478,15 @@ ToolResult { String content; bool isError }                       // ← the app
 typedef OnToolCall = Future<ToolResult> Function(ToolCall call);
 
 ImageSendOptions {
-  int maxLongEdge = 2048;
-  int jpegQuality = 85;
+  int maxLongEdge = 2048;       // must be > 0
+  int jpegQuality = 85;         // must be within 1..100 inclusive
   int maxImagesPerMessage = 4;  // Core source of truth; must be > 0
 }
 ```
 
-Invalid image-option values throw `ArgumentError` at session construction. A
+Image-option values outside these exact ranges (`maxLongEdge > 0`,
+`jpegQuality` 1..100 inclusive, `maxImagesPerMessage > 0`) throw
+`ArgumentError` at session construction. A
 command whose raw image count exceeds `maxImagesPerMessage` is internally
 `rejected`: no public phase change, Message, key, checkpoint or backend call;
 the public Future completes and package widgets keep the draft.
