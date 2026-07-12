@@ -738,10 +738,14 @@ release; it is never a debug-only `assert` or a silent clamp:
   and never shows the failure row, the thinking placeholder, resend/regenerate
   or the empty-reply action; a `complete` assistant Message with no visible
   content draws no bubble at all. A `system` Message renders as plain text in
-  the assistant visual style, left-aligned.
+  the assistant visual style. `MessageBubble` owns **no outer alignment** and
+  does not wrap itself in `Align`/a positioning `Row`: when used standalone,
+  its parent positions it.
 - **ChatMessageList** subscribes to `session.states` and `session.tokens` and
   reads `session.snapshot`; it owns the thinking placeholder, the failure row,
-  the resend/regenerate actions and the empty-reply action.
+  the resend/regenerate actions, the empty-reply action and **all outer bubble
+  alignment**. Assistant/system Messages are left-aligned; user Messages are
+  right-aligned when `ownMessagesRight` is true and left-aligned otherwise.
 - **ChatInputBar** owns its draft and image previews; `ChatTheme` styles it
   too. No public controller/focus/keyboard or scroll APIs in v1.
 
