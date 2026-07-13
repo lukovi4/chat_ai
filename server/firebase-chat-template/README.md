@@ -11,9 +11,14 @@ own provider key, its own billing (ADR 0001, V1_SPEC §9,
 > Schema v1 validator) and the **OpenAI Responses translator** (request mapping +
 > stream translation). There is **no** Cloud Function, HTTP handler, Firebase
 > Admin/Firestore/GCS adapter, idempotency/replay pipeline, quota hooks or
-> Anthropic provider here. **Do not deploy this intermediate commit** — a partial
-> BFF must never masquerade as a deployable endpoint until the money / idempotency
-> / replay pipeline exists (the next server increment).
+> Anthropic provider here — and no `createChatHandler(dependencies)` factory or
+> app-owned `src/index.ts` composition root yet. The ownership/composition
+> boundary (that factory, the `ChatServerHooks`, and the app-owned composition
+> root) is **specified** in `docs/server-template.md` («Ownership and composition
+> boundary»), **not implemented** in this commit. **Do not deploy this
+> intermediate commit** — a partial BFF must never masquerade as a deployable
+> endpoint until the money / idempotency / replay pipeline exists (the next
+> server increment).
 
 ## What this increment provides
 

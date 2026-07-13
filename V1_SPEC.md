@@ -923,13 +923,25 @@ implementation), **Anthropic second** — the second real provider is what
 *proves* the normalisation layer (§1) instead of assuming it. Both ship in
 the v1 template; which one a deployment uses is its `tier→model` map.
 
-The template lives at **`server/firebase-chat-template/`** — a self-contained
-deployable Firebase Functions gen2 TypeScript project, deployed separately into
-each consuming app's own Firebase project (own key, own billing, ADR 0001). It
-carries its **own `package.json` / `package-lock.json`** (the lockfile **is**
-tracked — deployable app, not a library); `.firebaserc`, the project id,
-provider secrets and service-account / admin keys are **never** shipped with it
-(per-deployment only).
+The template lives at **`server/firebase-chat-template/`** — a **reusable**
+Firebase Functions gen2 TypeScript template for the BFF, copied and deployed into
+each consuming app's own Firebase project once that app adds its composition root,
+secrets and project (own key, own billing, ADR 0001). It is **not** a
+self-contained deployable project on its own (see the template README for the
+current increment's status). It carries its **own `package.json` /
+`package-lock.json`** (the lockfile **is** tracked — deployed as an app, not
+published as a library); `.firebaserc`, the project id, provider secrets,
+service-account / admin keys and the app's business rules are **never** shipped
+with it (per-deployment only).
+
+The ownership/composition boundary is normative in `docs/server-template.md`
+(«Ownership and composition boundary»): the template owns the mandatory runtime
+orchestration (validation, idempotency/replay pipeline, admission order,
+settlement) behind an internal `createChatHandler(dependencies)` factory, while
+each consuming app supplies the four required hooks and its own app-owned
+`src/index.ts` composition root (Firebase project, secrets, tiers, deploy
+settings). App settings choose values but cannot disable the mandatory
+safety/idempotency/accounting gates.
 
 ## 10. Fake backend (v1, `package:chat_ai/testing.dart`)
 

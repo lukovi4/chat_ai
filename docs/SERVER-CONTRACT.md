@@ -9,6 +9,17 @@ durable conversation history).
 > This is the wire contract, not an implementation. Any server honoring it is a
 > valid AI Backend.
 
+**Ownership note (composition, not wire).** The wire and runtime orchestration in
+this contract are owned by the kit's server template (`docs/server-template.md`):
+validation, the idempotency/replay pipeline, the admission order and settlement,
+behind an internal `createChatHandler(dependencies)` factory. What each consuming
+app supplies is the four **business hooks** (`checkEntitlement`, `checkRateLimit`,
+`reserveQuota`, `settleQuota`) and the **deployment composition** — its Firebase
+project, secrets, tiers and the app-owned `src/index.ts` that wires them into that
+factory. See `docs/server-template.md` («Ownership and composition boundary») for
+the full rules. This split is a composition boundary only; it does not change the
+wire contract below.
+
 ## 1. Provider normalisation happens on the server
 
 The proxy translates **OpenAI and Anthropic** into **one normalised SSE event
