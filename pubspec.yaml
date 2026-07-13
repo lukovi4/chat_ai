@@ -29,6 +29,7 @@ dependencies:
   # image decode/resize/JPEG re-encode in an isolate (§11).
   image: ^4.9.1
   uuid: ^4.5.3
+  gpt_markdown: ^1.1.7
 
 dev_dependencies:
   flutter_test:

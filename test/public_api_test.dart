@@ -7,6 +7,7 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:chat_ai/chat_ai.dart';
+import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
@@ -137,6 +138,136 @@ void main() {
     expect(backend, isA<FirebaseChatBackend>());
   });
 
+  test('the chat widgets, ChatTheme and the §3/§7 widget contracts are '
+      'public with their exact shapes', () async {
+    // Enums with their closed §7 catalogues.
+    expect(AvatarSide.values, [AvatarSide.leading, AvatarSide.trailing]);
+    expect(TimestampPosition.values, [
+      TimestampPosition.none,
+      TimestampPosition.belowBubble,
+    ]);
+
+    // ChatTheme: a const value class whose 20 fields are all assignable.
+    const theme = ChatTheme(
+      backgroundColor: Color(0xFF000001),
+      userBubbleColor: Color(0xFF000002),
+      assistantBubbleColor: Color(0xFF000003),
+      iconColor: Color(0xFF000004),
+      errorColor: Color(0xFF000005),
+      inputFillColor: Color(0xFF000006),
+      messageListPadding: EdgeInsets.all(1),
+      bubblePadding: EdgeInsets.all(2),
+      inputBarPadding: EdgeInsets.all(3),
+      messageSpacing: 4,
+      userTextStyle: TextStyle(fontSize: 10),
+      assistantTextStyle: TextStyle(fontSize: 11),
+      timestampTextStyle: TextStyle(fontSize: 12),
+      errorTextStyle: TextStyle(fontSize: 13),
+      inputTextStyle: TextStyle(fontSize: 14),
+      hintTextStyle: TextStyle(fontSize: 15),
+      userBubbleShape: RoundedRectangleBorder(),
+      assistantBubbleShape: StadiumBorder(),
+      maxBubbleWidthFactor: 0.9,
+      imageThumbnailSize: Size(5, 6),
+    );
+    expect(theme.maxBubbleWidthFactor, 0.9);
+    expect(const ChatTheme().backgroundColor, isNull);
+
+    // The §3 builder/callback typedefs: functions with the exact shapes are
+    // assignable to each typedef (the OnToolCall pattern above).
+    Widget buildAvatar(BuildContext context, MessageRole role) =>
+        const SizedBox();
+    final AvatarBuilder avatarBuilder = buildAvatar;
+    expect(avatarBuilder, isA<Widget Function(BuildContext, MessageRole)>());
+    Widget buildThinking(BuildContext context) => const SizedBox();
+    final ThinkingBuilder thinkingBuilder = buildThinking;
+    expect(thinkingBuilder, isA<Widget Function(BuildContext)>());
+    Widget buildError(
+      BuildContext context,
+      FailureCause cause,
+      VoidCallback? retry,
+    ) => const SizedBox();
+    final ErrorBuilder errorBuilder = buildError;
+    expect(
+      errorBuilder,
+      isA<Widget Function(BuildContext, FailureCause, VoidCallback?)>(),
+    );
+    Widget? buildPart(
+      BuildContext context,
+      Message message,
+      ContentPart part,
+    ) => null;
+    final PartBuilder partBuilder = buildPart;
+    expect(
+      partBuilder,
+      isA<Widget? Function(BuildContext, Message, ContentPart)>(),
+    );
+    Widget buildEmptyReply(BuildContext context, VoidCallback regenerate) =>
+        const SizedBox();
+    final EmptyReplyBuilder emptyReplyBuilder = buildEmptyReply;
+    expect(
+      emptyReplyBuilder,
+      isA<Widget Function(BuildContext, VoidCallback)>(),
+    );
+    Future<List<Uint8List>> pickImages() async => <Uint8List>[];
+    final OnAttach onAttach = pickImages;
+    expect(onAttach, isA<Future<List<Uint8List>> Function()>());
+    Future<String?> dictate() async => null;
+    final OnMic onMic = dictate;
+    expect(onMic, isA<Future<String?> Function()>());
+    void tapImage(Uint8List bytes) {}
+    final OnImageTap onImageTap = tapImage;
+    expect(onImageTap, isA<void Function(Uint8List)>());
+
+    // The three widgets construct with their full §7 parameter sets.
+    final session = ChatSession(
+      backend: _StubBackend(),
+      botProfile: const BotProfile(id: 'b', systemPrompt: 's', tools: []),
+    );
+    final bubble = MessageBubble(
+      message: Message(
+        id: 'a-1',
+        role: MessageRole.assistant,
+        parts: const [ContentPart.text('hi')],
+        status: MessageStatus.complete,
+        attemptKey: 'k-1',
+        createdAt: createdAt,
+      ),
+      theme: theme,
+      markdown: false,
+      partBuilder: partBuilder,
+      onImageTap: onImageTap,
+    );
+    expect(bubble.markdown, isFalse);
+    final messageList = ChatMessageList(
+      session: session,
+      failureText: (cause) => cause.name,
+      theme: theme,
+      ownMessagesRight: false,
+      showAvatars: true,
+      avatarSide: AvatarSide.trailing,
+      timestamps: TimestampPosition.belowBubble,
+      markdown: false,
+      avatarBuilder: avatarBuilder,
+      thinkingBuilder: thinkingBuilder,
+      errorBuilder: errorBuilder,
+      partBuilder: partBuilder,
+      emptyReplyBuilder: emptyReplyBuilder,
+      onImageTap: onImageTap,
+    );
+    expect(messageList.session, same(session));
+    final inputBar = ChatInputBar(
+      session: session,
+      theme: theme,
+      hint: 'ask',
+      onAttach: onAttach,
+      onMic: onMic,
+      maxAttachments: 2,
+    );
+    expect(inputBar.maxAttachments, 2);
+    await session.dispose();
+  });
+
   test('the export boundary keeps internals and testing surface out', () {
     final barrel = File('lib/chat_ai.dart').readAsStringSync();
     // No testing-only surface in the production barrel.
@@ -158,6 +289,25 @@ void main() {
     expect(barrel.contains('sendWithDisposition'), isFalse);
     expect(barrel.contains('ChatCommandDisposition'), isFalse);
 
+    // The widgets are exported selectively: the three widget classes and the
+    // ChatTheme value class only — the package-internal theme
+    // resolver/validation helpers and the imageOptions bridge never reach
+    // the public surface, and no gpt_markdown type leaks through the barrel.
+    expect(barrel.contains('show ChatInputBar'), isTrue);
+    expect(barrel.contains('show ChatMessageList'), isTrue);
+    expect(barrel.contains('show ChatTheme'), isTrue);
+    expect(barrel.contains('show MessageBubble'), isTrue);
+    expect(
+      barrel.contains("export 'src/widgets/widget_contracts.dart'"),
+      isTrue,
+    );
+    expect(barrel.contains('imageOptionsForWidgets'), isFalse);
+    expect(barrel.contains('errorRecoveryForWidgets'), isFalse);
+    expect(barrel.contains('ChatErrorRecovery'), isFalse);
+    expect(barrel.contains('ChatThemeResolution'), isFalse);
+    expect(barrel.contains('checkChatTheme'), isFalse);
+    expect(barrel.contains('gpt_markdown'), isFalse);
+
     // The testing entry exports exactly the scriptable fake (V1_SPEC §10) —
     // no capture seam, and never re-exported from the main barrel.
     final testing = File('lib/testing.dart').readAsStringSync();
@@ -165,4 +315,12 @@ void main() {
     expect(testing.contains('capturedRequestsOf'), isFalse);
     expect(barrel.contains('FakeChatBackend'), isFalse);
   });
+}
+
+/// A minimal inert transport: enough to construct a [ChatSession] through
+/// the public surface alone — this file deliberately imports no `src/` and
+/// no testing entry.
+class _StubBackend implements ChatBackend {
+  @override
+  Stream<BackendEvent> send(ChatRequest request) => const Stream.empty();
 }

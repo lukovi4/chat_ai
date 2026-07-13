@@ -89,7 +89,8 @@ regenerate** без текста (паттерн Record_transcribe «состо�
 |---|---|---|
 | Stop | Input Bar: кнопка отправки превращается в «стоп» в `Sending`/`AwaitingTool`/`Streaming` — во всех фазах, где Core обещает cancel | `cancel` |
 | Resend | кнопка у `failed` сообщения юзера — **только когда оно последнее в Conversation** (у более старого `failed` кнопки нет: там resend — no-op Core) | resend (безопасная сторона Retry Boundary) |
-| Regenerate | кнопка у `interrupted` ответа бота и у empty-reply action; строка-ошибка без assistant вызывает regenerate только когда последний user Message `sent` | regenerate («платно = явный тап») |
+| Regenerate | кнопка у `interrupted` ответа бота и у empty-reply action | regenerate («платно = явный тап») |
+| Строка-ошибка | одно действие = recovery-target текущего `Failed`, который Core вычисляет по тому, что реально сделал сбойный reply (resend только когда anchor стал `failed`; regenerate только когда assistant стал `interrupted`; `none` — pre-Message-отказ или иной Failed без восстановления), и отдаёт виджету непубличным мостом — **не выводится из истории** | resend / regenerate / нет |
 | Copy | long-press на сообщении: все видимые TextPart по порядку через `"\n"`, исходный текст (markdown source как есть); image/tool/opaque части не копируются; видимого текста нет — no-op | буфер обмена |
 
 **Не встроено в v1:** edit сообщения юзера (механизм truncate-and-resend в
@@ -109,12 +110,14 @@ Core остаётся, UI приложение собирает само при 
   Bubble); приложение пишет один switch на 10 кодов каталога
   (CONTEXT.md §Failure).
 - **При `Failed`** виджет рисует одну строку-ошибку в ленте на месте обрыва:
-  иконка + текст из `failureText` + кнопка действия из раздела «Действия»
-  (resend — последний user Message `failed`; regenerate — ответ бота
-  `interrupted` или последний user Message `sent` без assistant).
-  Не снекбар, не баннер, не диалог. Один механизм на оба случая ошибки.
+  иконка + текст из `failureText` + кнопка действия — recovery-target
+  текущего `Failed` из Core (resend сбойного anchor / regenerate прерванного
+  ответа), либо **без кнопки**, когда валидного восстановления нет
+  (pre-Message-отказ). Не снекбар, не баннер, не диалог.
 - **Опциональный `errorBuilder`** — приложение рисует место ошибки целиком
-  само; `failureText` тогда не используется.
+  само; `failureText` тогда не используется. `retry` **nullable**: `null`
+  означает «валидного восстановления нет» — приложение не показывает retry;
+  no-op callback пакет не передаёт.
 - **Input Bar: опциональный `hint`** (плейсхолдер поля) — не передан → поле
   пустое. Дефолтных текстов нет.
 

@@ -186,7 +186,10 @@ typedef OnImageTap   = void Function(Uint8List bytes);
 // Builder slots (widgets, §7):
 typedef AvatarBuilder     = Widget Function(BuildContext, MessageRole);
 typedef ThinkingBuilder   = Widget Function(BuildContext);
-typedef ErrorBuilder      = Widget Function(BuildContext, FailureCause, VoidCallback retry);
+typedef ErrorBuilder      = Widget Function(BuildContext, FailureCause, VoidCallback? retry);
+                            // retry == null = no valid recovery (a pre-Message
+                            //   rejection); the app shows no retry control
+
 typedef PartBuilder       = Widget? Function(BuildContext, Message, ContentPart);
                             // return null = "use the default rendering"
 typedef EmptyReplyBuilder = Widget Function(BuildContext, VoidCallback regenerate);
@@ -764,11 +767,17 @@ widgets:
   user Message** (`resend(id)`); an older `failed` user Message gets no button
   (resend there is a Core no-op, §4);
 - regenerate on an `interrupted` reply and on the empty-`complete`-reply
-  action; on the error row after a `Failed` with no assistant only when the
-  last user Message is `sent` — if that user Message is `failed`, the row
-  shows resend instead. A `complete` reply with visible content gets no
-  regenerate. Assistant status `failed` does not exist (CONTEXT.md §Message
-  Status);
+  action. A `complete` reply with visible content gets no regenerate.
+  Assistant status `failed` does not exist (CONTEXT.md §Message Status);
+- **the error row's one action is the Core's recovery target of the current
+  `Failed`, not inferred from history**: `resend(id)` when THIS command's
+  anchor user Message actually became `failed`, `regenerate` when THIS reply's
+  assistant actually became `interrupted`, and **no action** for a pre-Message
+  rejection (malformed image / oversized payload) or any other `Failed` with
+  no valid recovery — the Core carries this target and hands it to the widget
+  through a package-internal bridge. The row still shows the failure (icon +
+  `failureText`); with no valid recovery a supplied `errorBuilder` receives a
+  `null` `retry` (never a no-op);
 - Copy on long-press: joins the Message's visible `TextPart`s in order with
   `"\n"`, source text as-is (markdown included); image/tool/opaque parts are
   never copied; no visible text = Copy is a no-op.
@@ -1003,11 +1012,15 @@ Against `FakeChatBackend` unless noted:
     malformed-image)` with no Message/backend; dispose invalidates resize;
     post-resize payload >10 MB gives rejected `contextTooLong` before backend;
     edit/resend preserves processed ImageParts without re-resize.
-13. **Widgets**: all states render; no built-in user-facing string; action is
-    chosen by history (`resend` only when the LAST Message is a `failed` user;
-    `regenerate` for a `sent` final user without assistant, an `interrupted`
+13. **Widgets**: all states render; no built-in user-facing string;
+    message-attached actions outside `Failed` follow message status (`resend`
+    only for the LAST `failed` user Message; `regenerate` for an `interrupted`
     assistant and the empty `complete` reply; a `complete` reply with visible
-    content gets none); `ChatTheme`/`maxAttachments` constraint violations
+    content gets none), while the error row's action during `Failed` comes
+    solely from the Core-computed recovery target of the current `Failed`
+    (`resend(messageId)`, `regenerate` or `none`); `none` means no button and
+    `ErrorBuilder` receives `null`, never a fabricated no-op callback;
+    `ChatTheme`/`maxAttachments` constraint violations
     throw `ArgumentError` during build before rendering/callbacks, identically
     in debug/release (never an assert-only guard or clamp); `partBuilder` receives
     text/image parts and hidden tool parts but never `ProviderOpaquePart`;

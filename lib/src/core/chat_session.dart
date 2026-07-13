@@ -68,6 +68,17 @@ const String _toolExecutionFailedResult = 'tool-execution-failed';
 /// `BackendEvent.Accepted`.
 enum ChatCommandDisposition { accepted, rejected, noOp }
 
+/// The package-internal recovery target of the CURRENT `Failed` (V1_SPEC §7):
+/// what — if anything — the widgets' error row re-runs. Computed by the Core
+/// at the failing terminal from what THIS reply actually did, never inferred
+/// by widgets from history: [resend] only when this command's anchor user
+/// Message actually became `failed` (its id in the bridge), [regenerate] only
+/// when this reply's assistant actually became `interrupted`, and [none] for
+/// a pre-Message rejection (malformed image / oversized payload) or any other
+/// `Failed` with no valid recovery. NOT public product API — never exported
+/// from `package:chat_ai/chat_ai.dart`.
+enum ChatErrorRecovery { none, resend, regenerate }
+
 /// The v1 Core façade (V1_SPEC §3/§4): **one instance = one open
 /// Conversation**. Constructing a session is the domain operation
 /// `open(history)` — in-flight statuses are normalised (`sending → failed`,
@@ -230,6 +241,12 @@ class ChatSession {
       StreamController<ConversationState>.broadcast();
   final StreamController<String> _tokens = StreamController<String>.broadcast();
   ConversationState _state = const ConversationState.idle();
+
+  /// The recovery target of the current `Failed` (V1_SPEC §7), set at every
+  /// terminal (default [ChatErrorRecovery.none]) and read only through
+  /// [errorRecoveryForWidgets]. Meaningful only while [state] is `Failed`.
+  ChatErrorRecovery _recovery = ChatErrorRecovery.none;
+  String? _recoveryMessageId;
 
   bool _disposed = false;
 
@@ -1001,6 +1018,7 @@ class ChatSession {
           FailureCause.toolLoopLimit,
           FailurePhase.streaming,
         ),
+        recovery: ChatErrorRecovery.regenerate,
       );
       return false;
     }
@@ -1141,29 +1159,51 @@ class ChatSession {
   void _failOperational(_Reply reply, FailureCause cause, {String? detail}) {
     if (reply.assistantId != null && !_removeTechnicalAssistant(reply)) {
       _interruptAssistant(reply);
+      // This reply's assistant Message actually became `interrupted`:
+      // regenerate is the valid recovery of THIS reply.
       _terminal(
         ConversationState.failed(
           cause,
           FailurePhase.streaming,
           developerDetail: detail,
         ),
+        recovery: ChatErrorRecovery.regenerate,
       );
       return;
     }
     _failAnchorUser(reply);
+    // The anchor user Message actually became `failed` (and is the last
+    // Message): resend targets exactly it. With no anchor (a first-leg
+    // recovery whose technical assistant was removed) there is nothing valid
+    // to resend — `none`.
+    final anchorId = reply.anchorUserId;
     _terminal(
       ConversationState.failed(
         cause,
         FailurePhase.sending,
         developerDetail: detail,
       ),
+      recovery: anchorId == null
+          ? ChatErrorRecovery.none
+          : ChatErrorRecovery.resend,
+      recoveryMessageId: anchorId,
     );
   }
 
-  void _terminal(ConversationState terminalState) {
+  void _terminal(
+    ConversationState terminalState, {
+    ChatErrorRecovery recovery = ChatErrorRecovery.none,
+    String? recoveryMessageId,
+  }) {
     _epoch++;
     _reply = null;
     _busy = false;
+    // The error-row recovery target of this terminal (V1_SPEC §7): non-`none`
+    // only when the failing site proved a valid recovery; every non-failure
+    // terminal (and every pre-Message rejection, which keeps the default) is
+    // `none`.
+    _recovery = recovery;
+    _recoveryMessageId = recoveryMessageId;
     _cancelBackoff();
     final events = _activeEvents;
     _activeEvents = null;
@@ -1649,6 +1689,26 @@ Future<ChatCommandDisposition> sendWithDisposition(
   String text, {
   List<Uint8List> images = const [],
 }) => session._send(text, images);
+
+/// Package-internal read of the session's image-send configuration
+/// (V1_SPEC §7): the Input Bar's effective attachment cap is
+/// `min(maxAttachments, session.imageOptions.maxImagesPerMessage)`, so the
+/// package widgets need the session-specific limit. Deliberately a top-level
+/// function excluded from the `chat_ai.dart` barrel — the public façade
+/// stays exactly V1_SPEC §3.
+ImageSendOptions imageOptionsForWidgets(ChatSession session) =>
+    session._imageOptions;
+
+/// Package-internal recovery target of the session's current `Failed`
+/// (V1_SPEC §7): the widgets' error row draws its one action from THIS,
+/// computed by the Core from what the failing reply actually did — never
+/// inferred from history. [kind] `none` ⇒ the row shows no action and any
+/// `errorBuilder` receives a `null` retry. Deliberately a top-level function
+/// excluded from the `chat_ai.dart` barrel — the public façade stays exactly
+/// V1_SPEC §3.
+({ChatErrorRecovery kind, String? messageId}) errorRecoveryForWidgets(
+  ChatSession session,
+) => (kind: session._recovery, messageId: session._recoveryMessageId);
 
 /// Internal test seam — NOT exported from `package:chat_ai/chat_ai.dart`.
 ///
