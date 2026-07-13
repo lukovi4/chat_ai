@@ -4,6 +4,13 @@
 > Wire-поведение — в `SERVER-CONTRACT.md`; здесь зафиксированы платформа,
 > служебные схемы, обязательные hooks и deploy-gates.
 
+Каталог шаблона — **`server/firebase-chat-template/`**: самостоятельный
+deployable Firebase Functions gen2 TypeScript-проект, разворачиваемый отдельно в
+Firebase-проект каждого consuming app. У него **собственные `package.json` /
+`package-lock.json`** (lockfile **отслеживается** — deployable app, не
+библиотека); `.firebaserc`, project ID, secrets и service-account / admin keys
+**не поставляются** с шаблоном (только per-deployment).
+
 ## Платформа
 
 **Firebase Cloud Functions gen2 (Node/TypeScript) + Firestore + private Google

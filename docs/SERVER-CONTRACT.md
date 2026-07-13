@@ -424,6 +424,13 @@ translator contract tests, MUST produce the same verdict for every fixture.
   Idempotency-Key **discipline** but with its **own fresh key**: each leg is a
   distinct billable call (ADR 0004; re-using the first leg's key would trip the
   §6 same-key conflict). The proxy relays it and the bot continues.
+- **ToolResult encoding is per-provider (server-only).** The internal ToolResult
+  carries `content` + `isError`. OpenAI Responses has no native `is_error`, so
+  the proxy encodes the pair as a **compact JSON string**
+  `{"content":<string>,"isError":<bool>}` (keys in that order) in
+  `function_call_output.output`. Anthropic instead uses native
+  `tool_result.content` + `is_error`. The client/wire ToolResult shape is
+  unchanged.
 - The server **never executes a Tool** — execution is always app code.
 
 ### Provider translation matrix (v1)
@@ -434,7 +441,7 @@ translator contract tests, MUST produce the same verdict for every fixture.
 | text/image history | Responses input items/content; base64 JPEG image input | Messages `text` / base64 `image` content blocks |
 | tool declaration | function tool with JSON Schema parameters; parallel calls disabled | `tools[].input_schema`; parallel use disabled through tool choice |
 | tool call | completed `function_call` item; streamed arguments buffered | completed `tool_use` block; streamed input buffered |
-| tool result | `function_call_output` paired by call id | `tool_result` paired by `tool_use_id` |
+| tool result (`content` + `isError`) | `function_call_output.output` = compact JSON `{"content","isError"}` (no native is_error), paired by call id | native `tool_result.content` + `is_error`, paired by `tool_use_id` |
 | opaque continuity | complete reasoning item/encrypted content → `provider_state` | complete `thinking`/`redacted_thinking` block → `provider_state` |
 | usage | final Responses usage → leg Usage | message start/delta usage combined → leg Usage |
 | normal final | completed response with no pending function call → `done` | `message_stop` with `end_turn`/`stop_sequence` → `done` |

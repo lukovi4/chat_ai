@@ -638,6 +638,13 @@ with `toolCall + toolResult` (`toolCallId`, `content`, `isError`) — under a
 **fresh** `Idempotency-Key` (per-leg, contract §7); the assistant Message's
 `attemptKey` is updated to the new leg's key.
 
+The client wire keeps the internal ToolResult intact (`content` + `isError`);
+mapping it to a provider is a **server-only** step (SERVER-CONTRACT §7): OpenAI
+Responses has no native `is_error`, so the proxy encodes the pair as a compact
+JSON string `{"content":<string>,"isError":<bool>}` in `function_call_output.output`,
+while Anthropic uses native `tool_result.content` + `is_error`. This does not
+change the client wire.
+
 ## 7. Widgets — concrete configuration
 
 Visual behaviour is docs/widgets-spec.md; this pins the exact public surface.
@@ -915,6 +922,14 @@ already our wire format — the thinnest translation, the reference
 implementation), **Anthropic second** — the second real provider is what
 *proves* the normalisation layer (§1) instead of assuming it. Both ship in
 the v1 template; which one a deployment uses is its `tier→model` map.
+
+The template lives at **`server/firebase-chat-template/`** — a self-contained
+deployable Firebase Functions gen2 TypeScript project, deployed separately into
+each consuming app's own Firebase project (own key, own billing, ADR 0001). It
+carries its **own `package.json` / `package-lock.json`** (the lockfile **is**
+tracked — deployable app, not a library); `.firebaserc`, the project id,
+provider secrets and service-account / admin keys are **never** shipped with it
+(per-deployment only).
 
 ## 10. Fake backend (v1, `package:chat_ai/testing.dart`)
 

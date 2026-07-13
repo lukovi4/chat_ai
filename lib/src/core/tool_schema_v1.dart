@@ -206,6 +206,10 @@ String? _schemaViolation(
             'declared type "$nonNullType"';
       }
     }
+    // A nullable enum must include null (SERVER-CONTRACT §7).
+    if (nullable && !enumValues.contains(null)) {
+      return '$path: a nullable enum must include null';
+    }
   }
   return null;
 }

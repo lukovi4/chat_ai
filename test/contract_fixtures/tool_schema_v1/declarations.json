@@ -276,6 +276,30 @@
           }
         }
       ]
+    },
+    {
+      "case": "bare null scalar enum contains null",
+      "tools": [
+        {
+          "name": "searchNotes",
+          "description": "d",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "v": {
+                "type": "null",
+                "enum": [
+                  null
+                ]
+              }
+            },
+            "required": [
+              "v"
+            ],
+            "additionalProperties": false
+          }
+        }
+      ]
     }
   ],
   "rejected": [
@@ -1478,6 +1502,33 @@
             ],
             "additionalProperties": false,
             "patternProperties": true
+          }
+        }
+      ]
+    },
+    {
+      "case": "nullable enum omits null",
+      "tools": [
+        {
+          "name": "searchNotes",
+          "description": "d",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "v": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "enum": [
+                  "a"
+                ]
+              }
+            },
+            "required": [
+              "v"
+            ],
+            "additionalProperties": false
           }
         }
       ]
