@@ -268,17 +268,24 @@ standard for retry-safe LLM calls, and the same spine as `record_transcribe`.
   `error(upstream)`/410 as applicable, and no joiner restarts it.
 
   **Running-record lifecycle.** The owner window ends exactly at
-  `createdAt + deployedFunctionTimeout`. `expiresAt` is absent while status is
+  `createdAt + functionTimeoutSeconds`. `expiresAt` is absent while status is
   `running`. Once the owner window has elapsed, the
   next observer atomically changes `running → aborted` and returns `410`; it
   does not call the provider. It calls idempotent
   `reserveQuota(getExisting, attemptKey)` to recover the existing
   `reservationId`, then settles that same ledger `unknown` if no exact provider
   outcome was recorded; it never creates another reservation. `complete` and `aborted` receive
-  `expiresAt = terminalAt + replayTTL`, and only those terminal records are
+  `expiresAt = terminalAt + replayTtlSeconds`, and only those terminal records are
   removed by Firestore TTL. A joiner waits for the same record to become
   terminal or disappear after its run-scoped release object is durable; it then
   replays that captured run's outcome and never calls the provider.
+
+  Both values are required app-owned `ChatServerDependencies` with no package
+  defaults. `functionTimeoutSeconds` MUST be the same positive integer used as
+  Firebase Functions gen2 `onRequest.timeoutSeconds`; `replayTtlSeconds` MUST be
+  a positive integer of at least `30` seconds (the client retry window), with
+  `600` seconds recommended for v1. Package deploy validation rejects a missing,
+  invalid or mismatched value.
 
   **Successful terminal commit order is strict:**
 

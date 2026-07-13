@@ -943,6 +943,13 @@ each consuming app supplies the four required hooks and its own app-owned
 settings). App settings choose values but cannot disable the mandatory
 safety/idempotency/accounting gates.
 
+The internal dependencies also require app-owned `functionTimeoutSeconds` and
+`replayTtlSeconds`, with no package defaults. The former is the exact positive
+integer used by both the handler owner window and Firebase Functions gen2
+`onRequest.timeoutSeconds`; the latter is a positive integer of at least the
+30-second client retry window (`600` seconds recommended for v1). Deploy
+validation rejects missing, invalid or mismatched values.
+
 ## 10. Fake backend (v1, `package:chat_ai/testing.dart`)
 
 `FakeChatBackend implements ChatBackend` — no network, no money. Scriptable

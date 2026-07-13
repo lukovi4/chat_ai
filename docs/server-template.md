@@ -129,7 +129,7 @@ idempotency/{uid}/keys/{key}       // uid в пути — security boundary
   outcomeBytes: number | null      // только complete
   createdAt: timestamp
   terminalAt: timestamp | null
-  expiresAt: timestamp | null      // только terminal; default +10 мин
+  expiresAt: timestamp | null      // только terminal; + replayTtlSeconds
 
 usage/{uid}/attempts/{attemptKey}
   uid, attemptKey, botId, provider, model
@@ -149,7 +149,7 @@ config/tiers/{tierId}
 ```
 
 `running` не имеет `expiresAt`. Наблюдатель после
-`createdAt + deployedFunctionTimeout` атомарно переводит stale `running` в
+`createdAt + functionTimeoutSeconds` атомарно переводит stale `running` в
 `aborted` и отвечает 410. На каждом чтении `expiresAt <= now` логически означает
 `unknown`, независимо от задержки Firestore TTL; TTL только физически убирает
 terminal metadata.
@@ -227,8 +227,9 @@ chat-replays/{uid}/{key}/{runId}.sse
 7. SDK retries равны нулю; `safeRelease` не содержит wildcard status family;
    cross-instance joiner fixture получает тот же release cause/retryAfter и
    делает ноль provider calls;
-8. function timeout, SSE headers/keepalive и `X-Chat-AI-Wire-Version: 1`
-   настроены.
+8. `functionTimeoutSeconds` совпадает с `timeoutSeconds` функции;
+   `replayTtlSeconds >= 30`; SSE headers/keepalive и
+   `X-Chat-AI-Wire-Version: 1` настроены.
 
 ## Ownership and composition boundary
 
@@ -274,6 +275,8 @@ Factory получает обязательный `ChatServerDependencies`:
 - `hooks: ChatServerHooks`;
 - `auth` — конкретный Firebase Admin **Auth** instance;
 - `appCheck` — конкретный Firebase Admin **App Check** instance;
+- `functionTimeoutSeconds` — фактический `timeoutSeconds` Firebase Function;
+- `replayTtlSeconds` — логический TTL terminal Attempt/replay;
 - Firestore instance;
 - private replay bucket;
 - registry настроенных provider clients (по одному на каждый tier из
@@ -292,6 +295,16 @@ state, так что скрытой зависимости от неявно и�
 `appCheck` — конкретные official Firebase Admin SDK instances; собственных
 `AuthVerifier`/`AppCheckVerifier` или иных framework-типов пакет не вводит.
 
+`functionTimeoutSeconds` и `replayTtlSeconds` — обязательные app-owned
+положительные целые значения без package defaults. Одно и то же значение
+`functionTimeoutSeconds` передаётся в `createChatHandler` и в Firebase Functions
+gen2 `onRequest({timeoutSeconds: ...})`: handler использует его как точную границу
+owner window, поэтому расхождение запрещено и является deploy-validation error.
+`replayTtlSeconds` определяет `expiresAt = terminalAt + replayTtlSeconds`, должен
+быть не меньше 30-секундного client retry window; рекомендуемое значение для v1 —
+`600` секунд. Выбор значения принадлежит приложению, применение TTL и запрет
+слишком короткого значения — обязательные инварианты пакета.
+
 Все зависимости обязательны и не имеют defaults. Отсутствующий dependency или
 hook, равно как молчаливый allow-all вместо реального hook, — это
 construction/deploy-validation error (см. «Deploy validation (fail closed)»).
@@ -304,6 +317,7 @@ construction/deploy-validation error (см. «Deploy validation (fail closed)»)
 
 - инициализирует Firebase Admin для своего Firebase project;
 - получает от него конкретные `Auth` и `App Check` instances;
+- выбирает обязательные `functionTimeoutSeconds` и `replayTtlSeconds`;
 - получает Firestore и private replay bucket;
 - создаёт provider SDK clients из Secret Manager;
 - реализует четыре business hooks;
@@ -311,7 +325,8 @@ construction/deploy-validation error (см. «Deploy validation (fail closed)»)
   `createChatHandler`;
 - оборачивает handler в Firebase Functions gen2 `onRequest`;
 - выбирает имя экспортируемой Cloud Function;
-- задаёт region, timeout, memory/concurrency и secret bindings;
+- задаёт region, memory/concurrency и secret bindings, а для `onRequest`
+  использует ровно тот же `functionTimeoutSeconds`, который передан factory;
 - запускает обязательную deploy validation.
 
 Канонический reusable template этого файла-композиции **не содержит**:
@@ -336,13 +351,15 @@ validation (fail closed)»), в частности:
 - присутствуют все четыре hooks и проходят idempotency contract;
 - каждый tier имеет provider client;
 - SDK retries отключены (`maxRetries: 0`);
-- timeout ограничивает orphaned generation;
+- `functionTimeoutSeconds` положителен и точно совпадает с `onRequest`
+  `timeoutSeconds`, ограничивая orphaned generation;
+- `replayTtlSeconds` — положительное целое значение не меньше `30`;
 - worst-case нормализованный SSE укладывается в 10 MB;
 - replay bucket private и имеет требуемые IAM/lifecycle settings;
 - Firestore TTL/indexes настроены по контракту.
 
-Приложение выбирает значения (project, secrets, tiers, лимиты, region, timeout),
-но не вправе снять сами gates.
+Приложение выбирает значения (project, secrets, tiers, лимиты, region,
+`functionTimeoutSeconds`, `replayTtlSeconds`), но не вправе снять сами gates.
 
 ### Test seam
 
