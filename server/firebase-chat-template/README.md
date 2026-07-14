@@ -5,19 +5,25 @@ Deployable **Firebase Cloud Functions gen2 (TypeScript) BFF template** for the
 deployed **fresh per consuming app** — its own Firebase project, its own provider
 key, its own billing (ADR 0001, V1_SPEC §9, `docs/server-template.md`).
 
-> ⚠️ **This is not a deployable endpoint yet.** This increment implements the
-> package-owned request runtime behind the internal
-> `createChatHandler(dependencies)` factory: Firebase Auth + App Check
-> verification, HTTP/wire validation, the Firestore idempotency lifecycle,
-> private-GCS terminal replay, the mandatory business hooks, OpenAI provider
-> dispatch, the normalised SSE lifecycle, settlement and cancellation. It is
-> **still not deployable** on its own — there is **no** Anthropic adapter, **no**
-> app-owned `src/index.ts` composition root, **no** Firebase project / secrets /
-> resource names, and deploy validation has not been run. **Do not deploy this
-> intermediate commit.** The remaining pieces (Anthropic adapter, the app-owned
-> composition root, project/secrets/resource configuration and deploy
-> validation) are separate later steps. This template is not v1-complete or
-> production-ready.
+> ⚠️ **OpenAI-only smoke — not v1-complete / not production-ready.** Two layers
+> live here, and the split matters:
+>
+> - **Reusable package-owned runtime** (`src/server/**`, behind the internal
+>   `createChatHandler(dependencies)` factory): Firebase Auth + App Check
+>   verification, HTTP/wire validation, the Firestore idempotency lifecycle,
+>   private-GCS terminal replay, the four mandatory business hooks, OpenAI
+>   provider dispatch, the normalised SSE lifecycle, settlement and cancellation.
+>   A consuming app never rewrites this.
+> - **App-owned OpenAI smoke composition** (`src/index.ts`, `src/smoke/hooks.ts`,
+>   `firebase.json`, `DEPLOY_SMOKE.md`, `replay-bucket-lifecycle.json`, and the
+>   Flutter `example/`): a thin composition root + real Firestore business hooks
+>   for a **dedicated, non-production smoke project**. This is app-owned
+>   deployment glue, not package API.
+>
+> There is **no Anthropic adapter** (the next product layer) and **no production
+> policy**. The OpenAI **API key never touches the client** — it lives only in
+> Secret Manager (`OPENAI_API_KEY`). Deploy this **only** to a throwaway smoke
+> project you own; it is not a production endpoint.
 
 ## What this increment provides
 
@@ -45,24 +51,42 @@ for every case.
 
 ## Platform & runtime
 
-- **Firebase Cloud Functions gen2**, Node.js runtime **`nodejs24`** — the newest
-  GA (non-preview) runtime. `engines.node` pins `>=24`.
-- Production dependencies: the official **`openai`** and **`firebase-admin`**
-  SDKs. `firebase-admin` supplies the concrete `Auth` / `App Check` / `Firestore`
-  / `Bucket` / `Timestamp` types and values the handler is injected with.
+- **Firebase Cloud Functions gen2**, Node.js runtime **`nodejs24`** (set in
+  `firebase.json`). `engines.node` pins `>=24`. `main` points at `lib/index.js`.
+- Production dependencies: the official **`openai`**, **`firebase-admin`** and
+  **`firebase-functions`** SDKs. `firebase-admin` supplies the concrete `Auth` /
+  `App Check` / `Firestore` / `Bucket` / `Timestamp` types/values injected into
+  the handler; `firebase-functions` supplies `onRequest` + params/secrets for the
+  app-owned composition root.
 - The gen2 HTTP handler signature is expressed with the standard Node `http`
   types (`IncomingMessage & { rawBody }` → `ServerResponse`), which a gen2
-  request and an express response satisfy — so the app-owned `onRequest(handler)`
-  stays assignable. **`firebase-functions` is intentionally not a dependency of
-  this template**: nothing here imports from it, and its current published peer
-  range for `firebase-admin` excludes the latest major — adding it would force a
-  stale `firebase-admin`. The app-owned composition root (a later increment)
-  depends on `firebase-functions` and wraps the handler in `onRequest`.
+  request and an express response satisfy — so `onRequest(handler)` compiles with
+  no cast.
+- **Temporary dependency exception (documented on purpose).** The kit rule is
+  latest-only, but the latest `firebase-functions` (`^7.2.5`) still declares a
+  `firebase-admin` peer range of `^11 || ^12 || ^13` — it does **not** yet accept
+  `firebase-admin@14`. To keep a clean, conflict-free install (no
+  `--legacy-peer-deps`, no `--force`, no overrides), `firebase-admin` is pinned
+  **exactly to `13.10.0`** (the latest compatible 13.x). This is the **only**
+  allowed deviation from latest-stable, and `npm outdated` may show **only**
+  `firebase-admin`. **Removal condition:** as soon as a latest `firebase-functions`
+  accepts `firebase-admin@14`, drop the pin and move back to latest `firebase-admin`.
 - Dev-only: `typescript`, `@types/node`, `vitest`. No Anthropic SDK, no
   Ajv/Zod/Express/DI framework.
 - **SDK retries must be zero.** The factory verifies each provider client's
-  public `maxRetries === 0` field at construction and refuses otherwise; the same
-  invariant remains a deploy-validation gate.
+  public `maxRetries === 0` field at construction and refuses otherwise; the
+  composition root builds the OpenAI client with `maxRetries: 0`.
+
+## Deploying the OpenAI-only smoke
+
+`src/index.ts` is the **app-owned** composition root: it initializes Firebase
+Admin, reads the mandatory deployment parameters + the `OPENAI_API_KEY` secret,
+builds the four business hooks (`src/smoke/hooks.ts`, real Firestore rate/quota)
+and hands the injected dependencies to `createChatHandler`, wrapped in the gen2
+`chat` function. The Flutter `example/` drives it from a physical device. The full
+step-by-step runbook (dedicated non-production project, private replay bucket,
+App Check debug, secret, parameters, deploy, logs, cleanup) is in
+**`DEPLOY_SMOKE.md`**. Nothing here is deployed by this task.
 
 ## Scripts
 

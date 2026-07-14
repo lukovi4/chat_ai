@@ -2,8 +2,9 @@
   "name": "firebase-chat-template",
   "version": "0.1.0",
   "private": true,
-  "description": "Deployable Cloud Functions gen2 BFF template for the chat_ai kit: package-owned createChatHandler runtime (Firebase verification, wire validation, idempotency/replay/quota orchestration, OpenAI Responses SSE). One per app. Not yet a deployable endpoint (no Anthropic adapter, app-owned src/index.ts, secrets or project config).",
+  "description": "Deployable Cloud Functions gen2 BFF template for the chat_ai kit: package-owned createChatHandler runtime (Firebase verification, wire validation, idempotency/replay/quota orchestration, OpenAI Responses SSE) plus an OpenAI-only smoke composition root. One per app. OpenAI-only smoke; not v1-complete or production-ready (no Anthropic adapter).",
   "license": "UNLICENSED",
+  "main": "lib/index.js",
   "engines": {
     "node": ">=24"
   },
@@ -14,7 +15,8 @@
     "test:watch": "vitest"
   },
   "dependencies": {
-    "firebase-admin": "^14.1.0",
+    "firebase-admin": "13.10.0",
+    "firebase-functions": "^7.2.5",
     "openai": "^6.46.0"
   },
   "devDependencies": {

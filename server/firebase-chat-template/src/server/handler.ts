@@ -21,7 +21,7 @@ import type { ChatRequest, NormalizedEvent, NormalizedUsage } from '../core/wire
 
 import { paramsHash, requestHash } from './canonical';
 import type { ChatServerDependencies } from './dependencies';
-import type { ChatServerHooks, QuotaReservation, Tier } from './hooks';
+import type { ChatServerHooks, QuotaReservation, ReserveQuotaResult, Tier } from './hooks';
 import { classifyOpenAIError, hasZeroRetries } from './openai';
 import {
   deleteObject,
@@ -609,19 +609,36 @@ async function runOwner(
     return;
   }
 
-  // 4. Quota reservation.
-  let reservation: QuotaReservation;
+  // 4. Quota reservation. The try/catch guards ONLY the hook call; result
+  // handling (denied / terminal / reserved) runs OUTSIDE it, so an error while
+  // emitting the terminal 410 (e.g. a failed response.end) can never fall through
+  // to the reserveQuota catch and trigger a safe release — which would make a
+  // durable-terminal key runnable again.
+  let reserve: ReserveQuotaResult;
   try {
-    const reserve = await deps.hooks.reserveQuota({ kind: 'createOrGet', uid, attemptKey, botId, tier });
-    if (reserve.kind === 'denied') {
-      await ownerAdmissionExit(deps, res, uid, attemptKey, runId, { status: 429, cause: 'quota' }, null, replayTtlMs);
-      return;
-    }
-    reservation = reserve.reservation;
+    reserve = await deps.hooks.reserveQuota({ kind: 'createOrGet', uid, attemptKey, botId, tier });
   } catch {
     await ownerAdmissionExit(deps, res, uid, attemptKey, runId, { status: 502, cause: 'upstream' }, null, replayTtlMs);
     return;
   }
+  if (reserve.kind === 'denied') {
+    await ownerAdmissionExit(deps, res, uid, attemptKey, runId, { status: 429, cause: 'quota' }, null, replayTtlMs);
+    return;
+  }
+  if (reserve.kind === 'terminal') {
+    // Durable terminal (billed/estimated/unknown) accounting for this key: NEVER
+    // re-dispatch, even though idempotency/replay metadata expiry minted a
+    // provisional owner claim. No provider call, no settlement (accounting is
+    // already terminal), and NO safe release/claim delete — that would make the
+    // key runnable again. Turn the provisional claim into an aborted tombstone
+    // (best-effort) and return a stable pre-stream 410; the client recovers with a
+    // fresh key. Even if the tombstone write or the 410 emit fails, dispatch stays
+    // forbidden and no safe release runs.
+    await commitAbortedBestEffort(deps, ref, runId, replayTtlMs);
+    sendPreStreamError(res, { status: 410, cause: 'upstream', detail: 'attempt-terminal' });
+    return;
+  }
+  const reservation: QuotaReservation = reserve.reservation;
 
   // 5. Build the exact typed provider request (local validation is pre-provider).
   let providerRequest;

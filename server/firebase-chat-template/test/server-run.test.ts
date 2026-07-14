@@ -435,3 +435,76 @@ describe('owner — failed keepalive aborts provider [defect 2]', () => {
     expect(hooks.settlements.at(-1)!.outcome.kind).toBe('unknown');
   });
 });
+
+describe('owner — durable terminal ledger forbids re-dispatch [P1 410]', () => {
+  it('reserveQuota terminal → pre-stream 410 attempt-terminal; no provider, no settle, aborted tombstone, no replay object', async () => {
+    const firestore = new FakeFirestore();
+    const bucket = new FakeBucket();
+    const hooks = new RecordingHooks({ reserveQuota: async () => ({ kind: 'terminal' }) });
+    const client = new FakeOpenAIClient(okEvents);
+    const handler = createChatHandler(
+      baseDeps({ firestore: asFirestore(firestore), bucket, hooks, openAIClients: clientRegistry(client) }),
+    );
+    const key = uuid('a');
+    const res = new FakeRes();
+    await handler(asReq(makeReq({ idempotencyKey: key })), asRes(res));
+
+    expect(res.statusCode).toBe(410);
+    expect(res.json()).toEqual({ cause: 'upstream', detail: 'attempt-terminal' });
+    expect(client.callCount).toBe(0); // provider never dispatched
+    expect(hooks.calls.some((c) => c.startsWith('settleQuota'))).toBe(false); // settlement not called
+    // The provisional claim is an aborted tombstone (not safe-released/deleted).
+    expect((firestore.store.get(docPath(key)) as Record<string, unknown>).status).toBe('aborted');
+    expect(bucket.objects.size).toBe(0); // no release/replay object created
+  });
+
+  it('a repeat under the same key still never dispatches (the tombstone 410s)', async () => {
+    const firestore = new FakeFirestore();
+    const bucket = new FakeBucket();
+    const hooks = new RecordingHooks({ reserveQuota: async () => ({ kind: 'terminal' }) });
+    const client = new FakeOpenAIClient(okEvents);
+    const handler = createChatHandler(
+      baseDeps({ firestore: asFirestore(firestore), bucket, hooks, openAIClients: clientRegistry(client) }),
+    );
+    const key = uuid('a');
+
+    const first = new FakeRes();
+    await handler(asReq(makeReq({ idempotencyKey: key })), asRes(first));
+    const second = new FakeRes();
+    await handler(asReq(makeReq({ idempotencyKey: key })), asRes(second));
+
+    expect(first.statusCode).toBe(410);
+    expect(second.statusCode).toBe(410); // second hit the aborted tombstone
+    expect(client.callCount).toBe(0); // no provider dispatch on either request
+  });
+
+  it('a throwing response.end while emitting the 410 never triggers a safe release [P2]', async () => {
+    const firestore = new FakeFirestore();
+    const bucket = new FakeBucket();
+    const hooks = new RecordingHooks({ reserveQuota: async () => ({ kind: 'terminal' }) });
+    const client = new FakeOpenAIClient(okEvents);
+    const handler = createChatHandler(
+      baseDeps({ firestore: asFirestore(firestore), bucket, hooks, openAIClients: clientRegistry(client) }),
+    );
+    const key = uuid('a');
+    const res = new FakeRes();
+    // The 410 emit fails: response.end throws AFTER headersSent is fixed. In the
+    // pre-fix code this threw inside the reserveQuota try/catch and fell through to
+    // ownerAdmissionExit → safeRelease, wrongly re-releasing a durable-terminal key
+    // (a release object would appear). The refactor keeps result handling outside
+    // that catch, so no safe release runs.
+    res.end = ((): void => {
+      res.headersSent = true;
+      throw new Error('socket closed');
+    }) as typeof res.end;
+
+    await expect(handler(asReq(makeReq({ idempotencyKey: key })), asRes(res))).resolves.toBeUndefined();
+
+    // No safe release: no release/replay object written, no settlement called.
+    expect(bucket.objects.size).toBe(0);
+    expect(hooks.calls.some((c) => c.startsWith('settleQuota'))).toBe(false);
+    // Provider never dispatched; the provisional claim is an aborted tombstone.
+    expect(client.callCount).toBe(0);
+    expect((firestore.store.get(docPath(key)) as Record<string, unknown>).status).toBe('aborted');
+  });
+});

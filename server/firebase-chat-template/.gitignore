@@ -9,4 +9,8 @@ coverage/
 # Service-account / admin keys must never be committed.
 *serviceAccount*.json
 *service-account*.json
+# Firebase CLI local artifacts / runtime config must never be committed.
+firebase-debug.log
+firebase-debug.*.log
+.runtimeconfig.json
 # package-lock.json IS committed — this is a deployable template, not a library.

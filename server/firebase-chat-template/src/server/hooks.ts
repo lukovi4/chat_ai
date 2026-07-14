@@ -38,7 +38,13 @@ export type ReserveQuotaRequest =
 
 export type ReserveQuotaResult =
   | { kind: 'reserved'; reservation: QuotaReservation }
-  | { kind: 'denied'; detail?: string };
+  | { kind: 'denied'; detail?: string }
+  // `createOrGet` only: the attempt already has a durable terminal, non-`unbilled`
+  // accounting outcome (`billed | estimated | unknown`), so it MUST NOT
+  // re-dispatch even after idempotency/replay metadata expiry — the handler
+  // returns a pre-stream 410. A terminal `unbilled` ledger is not this: it may
+  // reopen to `reserved`. This is a typed variant, never a `denied.detail` string.
+  | { kind: 'terminal' };
 
 export type Usage = { inputTokens: number | null; outputTokens: number | null };
 

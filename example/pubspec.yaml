@@ -1,0 +1,38 @@
+name: example
+description: "chat_ai OpenAI-only smoke harness — physical-device test of the real package widgets against a deployed smoke endpoint. Not a production sample app."
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: ^3.12.2
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # The package under test — the real widgets/Core, never a fork.
+  chat_ai:
+    path: ../
+
+  # Firebase attestation for the live smoke path (no provider key on device).
+  # firebase_auth 6.5.4 / firebase_app_check 0.4.5 are the LATEST COMPATIBLE
+  # stable: the newer 6.5.5 / 0.4.5+1 are broken upstream (they reference the
+  # removed `FirebasePlugin` symbol — renamed to `FirebasePluginPlatform` in
+  # firebase_core_platform_interface 7.1.0 — and fail to compile). Move up when
+  # a fixed release ships.
+  firebase_core: ^4.12.0
+  firebase_auth: 6.5.4
+  firebase_app_check: 0.4.5
+
+  # Image attachment via the Core's OnAttach.
+  image_picker: ^1.2.3
+
+  cupertino_icons: ^1.0.8
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true

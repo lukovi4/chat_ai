@@ -324,8 +324,26 @@ standard for retry-safe LLM calls, and the same spine as `record_transcribe`.
   server never starts a second generation under it — `running` joins, `complete`
   replays, `aborted` refuses. Only an unknown key runs. A completed paid reply
   is replayed within the terminal TTL, never re-billed. Terminal expiry
-  intentionally forgets the key; a later explicit recovery sees `unknown` and
-  may run, outside the silent-retry window.
+  intentionally forgets the key at the **idempotency/replay-metadata** level; a
+  later request sees `unknown` there and may claim a provisional owner, outside
+  the silent-retry window.
+
+  **The durable usage ledger overrides idempotency-metadata expiry.** The
+  idempotency record and its replay object are short-lived, but the usage/quota
+  ledger (§9) is durable. So "expiry forgets the key and may run" is bounded by
+  the ledger: expiry of idempotency/replay metadata may mint a provisional owner
+  claim, but if the durable ledger already holds a **terminal, non-`unbilled`**
+  outcome (`billed | estimated | unknown`) for the same `(uid, attemptKey)`,
+  `reserveQuota(createOrGet)` returns the typed `terminal` result and the owner
+  MUST stop before provider dispatch: it emits pre-stream
+  `410 {cause:"upstream", detail:"attempt-terminal"}`, marks the provisional
+  claim `aborted`, calls no provider and no `settleQuota`, and does **not**
+  safe-release the key (that would make it runnable again). Re-running after this
+  `410` is only an **explicit recovery under a fresh key** (§ Retry-After / fresh
+  key rules). A **safe-released** or **terminal `unbilled`** Attempt is different:
+  it may still reuse the old key per the existing reopen/silent-retry rules. This
+  is an internal accounting invariant only — the `410` wire shape and the public
+  Flutter API are unchanged.
 
   **Client rules for `409`/`410`** (they are protocol signals, not Failure
   causes — see §10):
@@ -510,6 +528,13 @@ Join/replay update or read that row; they never create another. On terminal/abor
 the same row is settled with exact
 provider usage when available, otherwise nullable counts and any defensible
 estimate from relayed deltas.
+
+The usage/quota ledger does **not** duplicate the Attempt lifecycle field
+`aborted`. The idempotency record is the sole authority for
+`running | complete | aborted`; the usage ledger is authoritative only for the
+reservation, usage and quota outcome. This prevents two persisted lifecycle
+states from diverging when quota settlement succeeds before replay finalisation
+later aborts the Attempt.
 
 Quota settlement has four typed outcomes:
 

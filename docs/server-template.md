@@ -81,7 +81,8 @@ type ReserveQuotaRequest =
   | { kind: "getExisting"; uid: string; attemptKey: string };
 type ReserveQuotaResult =
   | { kind: "reserved"; reservation: QuotaReservation }
-  | { kind: "denied"; detail?: string };
+  | { kind: "denied"; detail?: string }
+  | { kind: "terminal" };  // createOrGet only (see below)
 
 type Usage = { inputTokens: number | null; outputTokens: number | null };
 type QuotaOutcome =
@@ -111,6 +112,21 @@ settleQuota(
 same-key retry может перевести **тот же** ledger `unbilled → reserved`; новая
 reservation/usage-строка не создаётся. Других reopen-переходов нет.
 
+`ReserveQuotaResult.terminal` — типизированный результат **только для
+`createOrGet`** (никогда для `getExisting`, который остаётся settlement-recovery
+read и возвращает reservation). Он означает: durable usage ledger для этого
+`attemptKey` уже имеет terminal не-`unbilled` outcome (`billed | estimated |
+unknown`), поэтому повторный provider-dispatch запрещён — даже если
+idempotency/replay metadata уже истекли и был создан provisional owner claim.
+Handler на `terminal` не вызывает provider и не вызывает `settleQuota`
+(accounting уже terminal), не делает safe release и не удаляет claim (это снова
+сделало бы ключ пригодным для запуска), best-effort переводит provisional claim в
+`aborted` tombstone и возвращает pre-stream `410 {cause:"upstream",
+detail:"attempt-terminal"}`. Единственный terminal ledger, который может снова
+стать `running`, — `unbilled`; `denied` остаётся именно quota denial и
+отображается в `429`. Это состояние не кодируется через `denied.detail` или иные
+строковые соглашения.
+
 ## Firestore (минимальные схемы)
 
 ```text
@@ -138,7 +154,6 @@ usage/{uid}/attempts/{attemptKey}
   inputTokens: number | null
   outputTokens: number | null
   quotaOutcome: "billed" | "unbilled" | "estimated" | "unknown" | null
-  aborted: bool
   createdAt: timestamp
   terminalAt: timestamp | null
 
@@ -147,6 +162,12 @@ config/tiers/{tierId}
   model: string
   maxOutputTokens: number
 ```
+
+Usage ledger не дублирует lifecycle-состояние Attempt `aborted`. Единственный
+авторитетный источник `running | complete | aborted` — idempotency-запись;
+usage ledger отвечает только за reservation, usage и quota settlement. Это
+исключает рассинхронизацию, когда quota уже settled, а финализация replay позже
+переводит Attempt в `aborted`.
 
 `running` не имеет `expiresAt`. Наблюдатель после
 `createdAt + functionTimeoutSeconds` атомарно переводит stale `running` в
