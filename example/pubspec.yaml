@@ -15,14 +15,9 @@ dependencies:
     path: ../
 
   # Firebase attestation for the live smoke path (no provider key on device).
-  # firebase_auth 6.5.4 / firebase_app_check 0.4.5 are the LATEST COMPATIBLE
-  # stable: the newer 6.5.5 / 0.4.5+1 are broken upstream (they reference the
-  # removed `FirebasePlugin` symbol — renamed to `FirebasePluginPlatform` in
-  # firebase_core_platform_interface 7.1.0 — and fail to compile). Move up when
-  # a fixed release ships.
-  firebase_core: ^4.12.0
-  firebase_auth: 6.5.4
-  firebase_app_check: 0.4.5
+  firebase_core: ^4.12.1
+  firebase_auth: ^6.5.6
+  firebase_app_check: ^0.4.5+2
 
   # Image attachment via the Core's OnAttach.
   image_picker: ^1.2.3

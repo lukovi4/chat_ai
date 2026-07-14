@@ -18,8 +18,8 @@ dependencies:
   # firebase_core deliberately NOT direct: the consuming app initializes
   # Firebase; it arrives transitively via FlutterFire.
   dio: ^5.10.0
-  firebase_app_check: ^0.4.5
-  firebase_auth: ^6.5.4
+  firebase_app_check: ^0.4.5+2
+  firebase_auth: ^6.5.6
 
   # Sealed unions + value models (codegen)
   freezed_annotation: ^3.1.0
