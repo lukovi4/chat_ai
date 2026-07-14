@@ -35,7 +35,7 @@ const DAILY_ATTEMPT_QUOTA = defineInt('DAILY_ATTEMPT_QUOTA');
 // The deployment region — no default, so a value is mandatory at deploy (an
 // empty/absent region fails closed). Co-locate the Function, Firestore and the
 // replay bucket in this region (see DEPLOY_SMOKE.md).
-const FUNCTION_REGION = defineString('FUNCTION_REGION');
+const CHAT_FUNCTION_REGION = defineString('CHAT_FUNCTION_REGION');
 
 // The owner window and its onRequest timeout MUST be the same positive integer.
 const FUNCTION_TIMEOUT_SECONDS = 300;
@@ -102,11 +102,11 @@ function buildHandler(): ChatHttpHandler {
 /**
  * The deployable OpenAI-only smoke Cloud Function `chat` (Functions gen2,
  * runtime `nodejs24` via firebase.json). Deployed to the mandatory
- * `FUNCTION_REGION`; `timeoutSeconds` equals the factory
+ * `CHAT_FUNCTION_REGION`; `timeoutSeconds` equals the factory
  * `functionTimeoutSeconds`; only `OPENAI_API_KEY` is secret-bound.
  */
 export const chat = onRequest(
-  { region: FUNCTION_REGION, secrets: [OPENAI_API_KEY], timeoutSeconds: FUNCTION_TIMEOUT_SECONDS },
+  { region: CHAT_FUNCTION_REGION, secrets: [OPENAI_API_KEY], timeoutSeconds: FUNCTION_TIMEOUT_SECONDS },
   async (req, res) => {
     await buildHandler()(req, res);
   },

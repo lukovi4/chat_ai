@@ -24,7 +24,7 @@ it at a real user project.
 Choose a single `<function-region>` (e.g. a Cloud Run region) and **co-locate** the
 Function, Firestore and the replay bucket in it — cross-region hops add latency and
 egress and are not part of this smoke. This region is the mandatory
-`FUNCTION_REGION` parameter below.
+`CHAT_FUNCTION_REGION` parameter below.
 
 ## 3. Firestore
 
@@ -80,7 +80,7 @@ in code, args, README, git or any client config.
 All are required (no permissive defaults; the composition root/deploy fails closed
 otherwise). Provide them at the deploy prompts or a params file:
 
-- `FUNCTION_REGION` — the `<function-region>` from step 2 (no default; empty fails
+- `CHAT_FUNCTION_REGION` — the `<function-region>` from step 2 (no default; empty fails
   closed). Passed to `onRequest`'s region option.
 - `OPENAI_MODEL` — a vision + streaming + function-calling + strict-tools capable
   OpenAI model id (a deployment choice, never a package default).
@@ -96,7 +96,7 @@ firebase deploy --only functions
 ```
 
 `predeploy` runs `npm run build` (emits `lib/`). The exported function is `chat`
-(runtime `nodejs24`, region `FUNCTION_REGION`, `timeoutSeconds: 300`, secret
+(runtime `nodejs24`, region `CHAT_FUNCTION_REGION`, `timeoutSeconds: 300`, secret
 `OPENAI_API_KEY`).
 
 ## 8. Invoker IAM (gen2) — network invocation only, Auth/App Check still enforced
