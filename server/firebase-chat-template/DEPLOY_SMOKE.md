@@ -6,9 +6,11 @@ Firebase project** for a physical-device smoke of the full path:
 > device → Firebase Auth + App Check → Functions gen2 `chat` → `createChatHandler`
 > → OpenAI Responses stream → `FirebaseChatBackend` → `ChatSession` → package widgets.
 
-This is **OpenAI-only** and **not v1-complete / not production-ready** (no Anthropic,
-no product policy). It has **not** been deployed or device-tested. Do **not** point
-it at a real user project.
+This is the **OpenAI-only v1** live validation harness. It is not a production
+application composition because it has no app-specific production policy.
+Anthropic is product backlog and is not required for v1. The procedure was
+validated on physical iOS and Android devices on 2026-07-14; rerun the gates for
+every deployment. Do **not** point it at a real user project.
 
 > Never place real project IDs, keys, tokens, bucket names or credentials in this
 > repo. Everything below is a placeholder you fill locally.

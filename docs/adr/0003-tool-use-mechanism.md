@@ -37,9 +37,9 @@ tool drops in without changing the Package.
 - An interrupted tool-call applies nothing and surfaces `upstream` (Retry Boundary).
 - The tool-result round-trip reuses the Idempotency-Key discipline — with its
   own fresh key per leg (ADR 0004 / SERVER-CONTRACT.md §6–§7).
-- **v1 mandates the proxy disable parallel tool-calls** (both providers ship
-  the switch — `parallel_tool_calls: false` / `disable_parallel_tool_use:
-  true`; SERVER-CONTRACT.md §7): at most one `tool_call` per leg, so the
+- **v1 mandates the proxy disable parallel tool-calls** through OpenAI
+  `parallel_tool_calls: false` (SERVER-CONTRACT.md §7): at most one
+  `tool_call` per leg, so the
   single-call `AwaitingTool` cannot desynchronise from the bot. Parallel/
   multiple tool-calls and richer tool features are v2 and extend this without
   re-architecting (the loop and the event already exist).
@@ -68,8 +68,8 @@ The final pre-implementation model is:
 
 ## Amendment (2026-07-10, implementation hardening)
 
-- OpenAI reasoning items and Anthropic thinking/redacted-thinking blocks are
-  preserved as ordered hidden `ProviderOpaquePart`s through the same app-owned
+- OpenAI reasoning items are preserved as ordered hidden
+  `ProviderOpaquePart`s through the same app-owned
   assistant Message. They are never rendered or exposed to `partBuilder`, and
   are sent back only to the provider that produced them. This is continuity for
   the existing stateless tool loop, not a new product content type.
@@ -79,6 +79,7 @@ The final pre-implementation model is:
   a safe `is_error` result. Resolver exceptions are sanitised before becoming an
   `is_error` result.
 - Declarations use the closed portable Chat AI Tool Schema v1 dialect from
-  SERVER-CONTRACT §7, with one shared Dart/TypeScript/provider fixture corpus;
+  SERVER-CONTRACT §7, with one shared Dart/TypeScript/OpenAI fixture corpus;
   provider-specific schema extensions are rejected rather than interpreted
-  differently.
+  differently. Anthropic is backlog; its future adapter must pass the same
+  corpus and preserve its own opaque thinking state before release.

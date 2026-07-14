@@ -4,11 +4,11 @@ status: accepted
 
 # Provider key on the server, chat streamed via a proxy (BFF) over SSE
 
-The Package talks to OpenAI / Anthropic only through an **AI Backend** abstraction
+The Package talks to its configured provider through an **AI Backend** abstraction
 whose canonical implementation is a **server proxy (BFF)**: the provider API key
 lives **only server-side**, the proxy **streams the reply back over SSE**, and the
 proxy is the single place that enforces **Entitlement** (free/premium → model),
-rate limits, and provider switching. The client's Bot Profile is a *request*; the
+rate limits, and provider access policy. The client's Bot Profile is a *request*; the
 server decides the model actually used. This is the industry- and
 provider-recommended pattern and mirrors `record_transcribe`'s ADR 0001.
 
@@ -23,7 +23,7 @@ provider-recommended pattern and mirrors `record_transcribe`'s ADR 0001.
   (days). Putting the map in **server config** lets models and rules change with no
   app release.
 - **WebSocket transport.** Rejected for v1: chat reply streaming is one-directional,
-  and SSE is the native, proxy-friendly format both providers already speak.
+  and SSE is the proxy-friendly format used by the v1 OpenAI path.
 
 ## Consequences
 
@@ -32,7 +32,7 @@ provider-recommended pattern and mirrors `record_transcribe`'s ADR 0001.
 - Entitlement and quota are re-verified **server-side**; the client cannot grant
   itself a model. The Core knows nothing about subscriptions or the `tier→model`
   map.
-- Swapping provider (OpenAI ↔ Anthropic) is a server/AI-Backend change, invisible
+- Adding or swapping a future provider is a server/AI-Backend change, invisible
   to the Core.
 - A deployable server template (the BFF) is part of the kit, deployed fresh per
   Consuming App (own key, own billing) — same model as `record_transcribe`.
@@ -49,3 +49,11 @@ owner runs entitlement → rate → quota reserve → provider. Missing hooks or
 silent default-allow fail deployment. This adds no business policy to the kit;
 each Consuming App supplies its own policy behind the mandatory enforcement
 points.
+
+## Amendment (2026-07-14, v1 provider scope)
+
+v1 ships **OpenAI Responses only**. Anthropic is deferred to the product backlog
+and is not a v1 acceptance criterion. The provider-neutral AI Backend/SSE
+boundary and reserved persisted/wire discriminator remain so a future adapter
+does not require a client or storage migration; this is not a promise of current
+Anthropic support.

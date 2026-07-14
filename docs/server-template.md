@@ -4,6 +4,11 @@
 > Wire-поведение — в `SERVER-CONTRACT.md`; здесь зафиксированы платформа,
 > служебные схемы, обязательные hooks и deploy-gates.
 
+**Provider scope v1: только OpenAI Responses.** Anthropic adapter перенесён в
+product backlog и не является v1 acceptance criterion. Значение `anthropic`
+остаётся зарезервированным в persisted/internal типах, но v1 не устанавливает
+SDK, не выполняет dispatch и fail-closed отклоняет такой tier.
+
 Каталог шаблона — **`server/firebase-chat-template/`**: reusable Firebase
 Functions gen2 TypeScript-**шаблон** BFF, копируемый и разворачиваемый в
 Firebase-проект каждого consuming app после того, как приложение добавит свой
@@ -61,7 +66,7 @@ Provider-generation rate limit никогда не стоит перед recover
 ```ts
 type Tier = {
   id: string;
-  provider: "openai" | "anthropic";
+  provider: "openai" | "anthropic"; // v1: openai; anthropic reserved backlog
   model: string;
   maxOutputTokens: number;
 };
@@ -135,7 +140,7 @@ idempotency/{uid}/keys/{key}       // uid в пути — security boundary
   runId: string                    // fresh UUID для каждого unknown→running
   requestHash: string               // provisional canonical input hash для
                                     // running до entitlement/provider resolution
-  provider: "openai" | "anthropic" | null // frozen до quota/provider dispatch
+  provider: "openai" | "anthropic" | null // v1 writes openai; anthropic reserved
   paramsHash: string | null         // SHA-256 canonical provider-effective JSON:
                                    // wireVersion и message id/status/createdAt/
                                    // attemptKey удалены; matching opaque включён,
@@ -158,7 +163,7 @@ usage/{uid}/attempts/{attemptKey}
   terminalAt: timestamp | null
 
 config/tiers/{tierId}
-  provider: "openai" | "anthropic"
+  provider: "openai" | "anthropic" // v1 deployment allows openai only
   model: string
   maxOutputTokens: number
 ```
@@ -213,18 +218,18 @@ chat-replays/{uid}/{key}/{runId}.sse
 
 ## Provider adapters и safe release
 
-- Оба official SDK создаются с `maxRetries: 0` (или точным zero-retry параметром
-  pinned версии). Ни один 5xx/timeout не повторяется под idempotency-слоем.
+- v1 поставляет только OpenAI adapter. Official OpenAI SDK создаётся с
+  `maxRetries: 0`; ни один 5xx/timeout не повторяется под idempotency-слоем.
 - OpenAI: **Responses API**, `store:false`, без `previous_response_id` и
   background mode; reasoning continuity возвращается через encrypted opaque
   items.
-- Anthropic: **Messages API**, `anthropic-version: 2023-06-01`; thinking и
-  redacted-thinking blocks сохраняются без изменений.
+- Future/backlog, не v1: Anthropic Messages adapter с сохранением
+  thinking/redacted-thinking blocks.
 - `safeRelease` — закрытая per-adapter таблица: pinned OpenAI retryable
-  rate-limit 429 (но не insufficient-quota/credit), Anthropic
-  `429 rate_limit_error` и `529 overloaded_error`, плюс connect failure до нуля
+  rate-limit 429 (но не insufficient-quota/credit) плюс connect failure до нуля
   записанных request bytes. Fixtures пинят точную структуру; неизвестный вариант
-  fail-closed в `aborted`.
+  fail-closed в `aborted`. Будущий provider adapter обязан добавить собственную
+  точную allowlist до включения поддержки.
 - Generic `500/502/504`, unknown `5xx`, reset/timeout после записи байтов всегда
   `aborted`. DNS/TCP/TLS до нуля записанных request bytes может release.
 
@@ -237,12 +242,12 @@ chat-replays/{uid}/{key}/{runId}.sse
    vision, streaming, function calling, strict Tool schemas и stateless
    opaque-state round-trip;
    worst-case normalized SSE укладывается в 10 MB streaming response;
-3. OpenAI/Anthropic API family/version и translator goldens совпадают с
-   `SERVER-CONTRACT.md`;
+3. OpenAI API family/version и translator goldens совпадают с
+   `SERVER-CONTRACT.md`; Anthropic не является v1 deploy option;
 4. parallel tool calls отключены; Tool declarations/args проходят закрытый
    Chat AI Tool Schema v1 dialect из SERVER-CONTRACT §7; TypeScript validator и
-   оба translators проходят тот же `test/contract_fixtures/tool_schema_v1/`
-   corpus, что Dart Core;
+   OpenAI translator проходит тот же `test/contract_fixtures/tool_schema_v1/`
+   corpus, что Dart Core; будущий adapter обязан пройти его до релиза;
 5. Firestore TTL настроен только на terminal `expiresAt`;
 6. replay bucket private, IAM/service account и lifecycle policy корректны;
 7. SDK retries равны нулю; `safeRelease` не содержит wildcard status family;

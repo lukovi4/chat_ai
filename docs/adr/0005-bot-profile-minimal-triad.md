@@ -4,6 +4,9 @@ status: accepted
 
 # Bot Profile is the minimal agent triad: id + system prompt + tools
 
+Provider comparisons below are architectural rationale, not the shipped provider
+list. v1 supports OpenAI Responses only; Anthropic is product backlog.
+
 A Bot Profile carries exactly **three fields**: `id` (the tier *request* the
 server resolves to a model, ADR 0001), `systemPrompt` (the persona, rides in
 the assembled context, ADR 0002), and `tools` (the Tool declarations,

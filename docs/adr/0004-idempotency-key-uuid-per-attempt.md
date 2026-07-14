@@ -93,8 +93,7 @@ header. No market leader derives the key from request content.
 - Provider SDK automatic retries are disabled. A key may be released only for
   zero request bytes or the small exact provider-recommended retry allowlist
   pinned in SERVER-CONTRACT §6 (OpenAI retryable rate-limit 429 excluding
-  credit/quota errors; Anthropic `429 rate_limit_error` and
-  `529 overloaded_error`). Generic 500/502/504, unknown 5xx and every ambiguous
+  credit/quota errors). Generic 500/502/504, unknown 5xx and every ambiguous
   after-bytes failure become `aborted`/410.
 - Firestore stores Attempt metadata and a verified pointer, not the SSE body.
   The short-lived terminal outcome lives in a private GCS object (ADR 0006).
@@ -103,3 +102,9 @@ header. No market leader derives the key from request content.
   replayed. Logical `expiresAt` is checked on reads; Firestore TTL/GCS lifecycle
   are cleanup only. Each actual run uses a fresh `runId` path; corrupt/missing
   replay is repaired to `aborted`/410 so explicit recovery is not trapped.
+
+## Amendment (2026-07-14, v1 provider scope)
+
+The active v1 allowlist is OpenAI-only. Anthropic is backlog; a future adapter
+must define and fixture its exact release/abort classifications before support
+can be enabled. No speculative Anthropic status mapping is active in v1.

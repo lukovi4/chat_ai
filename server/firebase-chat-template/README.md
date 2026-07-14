@@ -5,7 +5,7 @@ Deployable **Firebase Cloud Functions gen2 (TypeScript) BFF template** for the
 deployed **fresh per consuming app** — its own Firebase project, its own provider
 key, its own billing (ADR 0001, V1_SPEC §9, `docs/server-template.md`).
 
-> ⚠️ **OpenAI-only smoke — not v1-complete / not production-ready.** Two layers
+> **v1 provider scope: OpenAI Responses only.** Two layers
 > live here, and the split matters:
 >
 > - **Reusable package-owned runtime** (`src/server/**`, behind the internal
@@ -20,12 +20,14 @@ key, its own billing (ADR 0001, V1_SPEC §9, `docs/server-template.md`).
 >   for a **dedicated, non-production smoke project**. This is app-owned
 >   deployment glue, not package API.
 >
-> There is **no Anthropic adapter** (the next product layer) and **no production
-> policy**. The OpenAI **API key never touches the client** — it lives only in
+> Anthropic is explicitly deferred to the product backlog and does not block
+> v1. The included composition has **no production policy**: its hooks are for a
+> dedicated smoke project, while each consuming app supplies its own production
+> business hooks. The OpenAI **API key never touches the client** — it lives only in
 > Secret Manager (`OPENAI_API_KEY`). Deploy this **only** to a throwaway smoke
 > project you own; it is not a production endpoint.
 
-## What this increment provides
+## What v1 provides
 
 | Area | File(s) | Summary |
 |---|---|---|
@@ -71,7 +73,7 @@ for every case.
   allowed deviation from latest-stable, and `npm outdated` may show **only**
   `firebase-admin`. **Removal condition:** as soon as a latest `firebase-functions`
   accepts `firebase-admin@14`, drop the pin and move back to latest `firebase-admin`.
-- Dev-only: `typescript`, `@types/node`, `vitest`. No Anthropic SDK, no
+- Dev-only: `typescript`, `@types/node`, `vitest`. No Anthropic SDK (backlog), no
   Ajv/Zod/Express/DI framework.
 - **SDK retries must be zero.** The factory verifies each provider client's
   public `maxRetries === 0` field at construction and refuses otherwise; the

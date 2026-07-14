@@ -45,6 +45,12 @@ follow directly.
   recording/transcription (`onMic` callback) — camera, gallery and microphone
   permissions are entirely the app's business.
 
+**v1 provider scope:** the shipped server adapter is **OpenAI Responses only**.
+Anthropic is deferred to the product backlog and is not a v1 acceptance
+criterion. Any `anthropic` discriminator or mapping mentioned below is a
+reserved persisted/wire value or a future-adapter design reference; it does not
+claim an installed SDK, working dispatch path or v1 support.
+
 ## 2. Dependencies (all internal to the package)
 
 The app does **not** see these except Firebase (which the app initializes
@@ -392,9 +398,10 @@ sealed ContentPart =
   Message never has one. A `toolResult.toolCallId` matches the nearest
   unclosed call. `toolCallId` is unique inside one logical reply. Tool and
   provider-opaque parts never appear on `user`/`system` Messages.
-- `ProviderOpaquePart.provider` is `openai` or `anthropic`; it is kept in
-  source order and sent only to that same provider. It is ignored for the
-  visible grammar, UI, Token Stream and builder callbacks.
+- `ProviderOpaquePart.provider` is `openai` or `anthropic`; `openai` is active
+  in v1, while `anthropic` is a reserved backlog discriminator. Opaque parts
+  are kept in source order and sent only to the same supported provider. They
+  are ignored for the visible grammar, UI, Token Stream and builder callbacks.
 - One reply = one assistant Message: tool-call and tool-result parts live
   **inside it**, so history can never separate a call from its result (and
   Context Trimming, which drops whole Messages, cannot either).
@@ -555,8 +562,8 @@ CONTEXT.md §Context Assembly — filtering pinned here):
   of the contract, in reverse.
 - System input order is exact: `BotProfile.systemPrompt`, then persisted
   `system` Messages chronologically. The proxy removes those Messages from
-  ordinary history and maps the combined sequence to provider instructions
-  (OpenAI) / system (Anthropic).
+  ordinary history and maps the combined sequence to OpenAI instructions. A
+  future provider adapter must preserve the same order.
 - `ProviderOpaquePart` remains ordered inside its assistant Message. The proxy
   returns it only to the matching provider and omits foreign-provider opaque
   parts after a provider switch; matching opaque bytes remain part of the
@@ -642,8 +649,8 @@ The client wire keeps the internal ToolResult intact (`content` + `isError`);
 mapping it to a provider is a **server-only** step (SERVER-CONTRACT §7): OpenAI
 Responses has no native `is_error`, so the proxy encodes the pair as a compact
 JSON string `{"content":<string>,"isError":<bool>}` in `function_call_output.output`,
-while Anthropic uses native `tool_result.content` + `is_error`. This does not
-change the client wire.
+while a future Anthropic adapter must map the unchanged client shape to its
+native result form. This does not change the client wire.
 
 ## 7. Widgets — concrete configuration
 
@@ -917,11 +924,12 @@ that leg.
 ## 9. Server template
 
 Spec: docs/server-template.md (Firebase CF gen2 + Firestore). Implementation
-order pinned here: **OpenAI translator first** (its tool-declaration shape is
-already our wire format — the thinnest translation, the reference
-implementation), **Anthropic second** — the second real provider is what
-*proves* the normalisation layer (§1) instead of assuming it. Both ship in
-the v1 template; which one a deployment uses is its `tier→model` map.
+scope for v1 is **OpenAI Responses only**. The normalised client/server boundary
+remains provider-agnostic, but no second provider is promised by v1.
+**Anthropic is product backlog**: its adapter, SDK, translator fixtures,
+error/safe-release mapping and deployment support are future work. Existing
+`anthropic` persisted/wire discriminator values remain reserved so this scope
+decision does not require a breaking data or wire migration.
 
 The template lives at **`server/firebase-chat-template/`** — a **reusable**
 Firebase Functions gen2 TypeScript template for the BFF, copied and deployed into
@@ -1029,11 +1037,14 @@ Against `FakeChatBackend` unless noted:
    remains fixed for the full logical reply. Constructor/setter reject missing
    resolver, duplicate/invalid names and non-v1 schemas with `ArgumentError`;
    shared accepted/rejected schema + argument fixtures produce identical Dart,
-   TypeScript, OpenAI-translator and Anthropic-translator verdicts.
-9. **Provider opaque continuity**: OpenAI and Anthropic opaque parts round-trip
-   byte-exact through JSON/restart/tool legs, preserve ordering and are returned
-   only to the matching provider; they never enter Token Stream, rendering or
-   `partBuilder`. Whole-message trimming keeps them with their tool exchange.
+   TypeScript and OpenAI-translator verdicts. A future provider adapter must pass
+   the same corpus before it can ship.
+9. **Provider opaque continuity**: OpenAI opaque parts round-trip byte-exact
+   through JSON/restart/tool legs, preserve ordering and are returned only to
+   OpenAI; they never enter Token Stream, rendering or `partBuilder`. Reserved
+   Anthropic opaque parts remain byte-exact in persisted JSON but are not
+   dispatched by the v1 server. Whole-message trimming keeps opaque parts with
+   their tool exchange.
 10. **Edge replies/throttle**: empty done is a complete empty Message;
     tool-only and whitespace replies work; cancellation keeps the full internal
     accumulator, not only the last throttled emission.
@@ -1077,9 +1088,9 @@ Against `FakeChatBackend` unless noted:
     chunks; malformed JSON; unknown event; duplicate terminal; event after
     terminal; EOF without terminal; ordered `provider_state` replay.
 17. **Server contract/integration** (real template, not Fake):
-    - pinned OpenAI Responses and Anthropic Messages fixtures translate text,
-      images, system instructions, tools/results, opaque state, usage, stop
-      reasons and exact provider error structures into byte-exact normalised SSE;
+    - pinned OpenAI Responses fixtures translate text, images, system
+      instructions, tools/results, opaque state, usage, stop reasons and exact
+      provider error structures into byte-exact normalised SSE;
     - two concurrent same-key requests make one provider call; live `running`
       joins; stale owner atomically aborts; complete replay reproduces `done` or
       the same `tool_call`; aborted returns 410; canonical provider-effective
@@ -1094,7 +1105,8 @@ Against `FakeChatBackend` unless noted:
       it atomically becomes `aborted`/410 so explicit recovery performs its one
       fresh-key fallback; every unknown→running mints a fresh `runId` and old-run
       cleanup cannot delete the newer replay object;
-    - adapter safe-release is the exact pinned 429/529 allowlist; generic
+    - the OpenAI adapter safe-release is the exact pinned retryable-429
+      allowlist; generic
       500/502/504, unknown 5xx and any ambiguous after-bytes failure abort. A
       released key can rerun only on the next backend request; an aborted key
       cannot. A cross-instance joiner captures the owner's `runId`, receives the
@@ -1110,8 +1122,8 @@ Against `FakeChatBackend` unless noted:
       that same reservation before settling it unknown;
     - unsupported wire version, malformed body and local validation create no
       key/usage/provider call; private bucket access and lifecycle/deploy config
-      validations fail closed; both provider SDKs are configured with zero
-      automatic retries and a forced 5xx/timeout fixture produces exactly one
+      validations fail closed; the OpenAI SDK is configured with zero automatic
+      retries and a forced 5xx/timeout fixture produces exactly one
       provider request; every tier's worst-case normalized SSE passes the 10 MB
       Functions streaming-response deploy gate.
 18. **Cancel/platform smoke**: observed disconnect/write failure invokes the

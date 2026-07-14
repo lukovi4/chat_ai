@@ -115,7 +115,7 @@ recovery artifact, not conversation history (SERVER-CONTRACT.md §6, ADR 0006).
 Why client-side, and not a provider/server-stored history, is argued in
 **ADR 0002** — in short: storage is the app's job anyway (see Conversation
 Scope), the package server is reserved for the critical-only (the key,
-ADR 0001), and money is neutral either way (the providers' prompt caching
+ADR 0001), and money is neutral either way (OpenAI prompt caching
 discounts a repeated prefix regardless of who stores it). The system prompt
 lives in the **Bot Profile, on the app side** — all bot/prompt configuration is
 the app's; the Package only carries it as a parameter.
@@ -442,15 +442,20 @@ spine as `record_transcribe`'s idempotency. See ADR 0004, SERVER-CONTRACT.md
 §6 and the Retry Boundary.
 
 ### AI Backend
+**Provider scope v1: OpenAI Responses only.** Anthropic is explicitly deferred
+to the product backlog. Existing provider-neutral shapes and reserved
+`anthropic` discriminator values are compatibility seams, not a claim of v1
+support.
+
 The **transport**: where chat requests are sent and the model's response streams
 back. The Package treats it as an abstraction — it knows an endpoint and an
-authentication method, not whether OpenAI or Anthropic is called, nor directly vs.
-via a proxy. **The provider API key is never on the device**: it lives only on the
-server side. Swapping the AI provider means swapping this implementation, without
-touching the Core. Same spine as `record_transcribe`'s Transcription Backend.
+authentication method, not the raw provider protocol. **The provider API key is
+never on the device**: it lives only on the server side. Adding a future provider
+means adding a server adapter without touching the Core. Same spine as
+`record_transcribe`'s Transcription Backend.
 
-**Provider normalisation is the server's job.** The proxy translates OpenAI /
-Anthropic into **one normalised SSE event stream** (`delta` / `provider_state` /
+**Provider normalisation is the server's job.** The v1 proxy translates OpenAI
+into **one normalised SSE event stream** (`delta` / `provider_state` /
 `tool_call` / `done` / `error`) that the Core consumes. `provider_state` is an
 opaque continuity item: the Core persists and returns it but never interprets or
 renders it. Thus provider-specific reasoning/thinking state survives a stateless
@@ -459,19 +464,17 @@ a provider remains server-side translation work. See SERVER-CONTRACT.md and
 ADR 0001/0003.
 
 The canonical implementation is a **server proxy (BFF)** that holds the key and
-**streams the response back over SSE** — the de-facto standard for LLM token
-streaming (OpenAI/Anthropic native). The proxy is also the single place that
-enforces Entitlement, rate limits, and provider switching. (Key-on-server-only is
+**streams the response back over SSE**. The proxy is also the single place that
+enforces Entitlement, rate limits, and provider access policy. (Key-on-server-only is
 the industry and provider-recommended pattern; an embedded client key is trivially
 extracted from a mobile binary.) See ADR 0001.
 
 ### Usage
 The token counts a reply actually cost, handed to the app **as a fact** — input
 tokens, output tokens. The **server is the authoritative source** (it saw the real
-provider response), and it **normalises** the two providers' differing shapes
-(OpenAI reports usage in the final chunk; Anthropic splits input-at-start /
-output-at-end) into one count — same server-normalisation principle as SSE and
-tools. **On a multi-leg reply usage arrives per leg** (each leg's terminal
+provider response), and it **normalises** OpenAI usage into one count. A future
+provider adapter must produce the same Usage fact.
+**On a multi-leg reply usage arrives per leg** (each leg's terminal
 event carries its own count — SERVER-CONTRACT.md §2) and the Core **sums the
 legs** into the one Usage fact delivered with the reply's `Done`. An optional
 opaque **`usageRaw`** may ride along for logs/analytics (cf.
@@ -502,8 +505,8 @@ distinct (a separate `Cancelled` terminal, never a Failure). The set of causes i
 **closed** (the app renders UI from it), following `record_transcribe`'s catalogue
 discipline.
 
-**Cause catalogue (v1).** Adapted from `record_transcribe` for a two-provider
-(OpenAI / Anthropic) LLM chat. Split **by the fix, not by HTTP class**: causes
+**Cause catalogue (v1).** Adapted from `record_transcribe` for an OpenAI-backed
+LLM chat while retaining provider-neutral client codes. Split **by the fix, not by HTTP class**: causes
 the user/app must act on (sign in, pay, rephrase, shorten) vs. transient
 provider/transport causes the Core retries silently under the Retry Boundary
 deadline (`rate`, `overloaded`, `network`):
@@ -516,9 +519,9 @@ deadline (`rate`, `overloaded`, `network`):
   `Retry-After`, only while the same Attempt remains safe to join/replay or its
   key was released by the exact retryable provider allowlist. An ambiguous provider response aborts
   instead of risking a second charge.
-- `overloaded` — the provider is temporarily overloaded (Anthropic 529);
-  follows the same exact-allowlist silent-retry rule and wall-clock deadline as
-  `rate`. Distinct cause, because its backoff guidance differs.
+- `overloaded` — a reserved provider-neutral overload cause. The v1 OpenAI
+  adapter does not emit it; a future provider adapter must define an exact,
+  fixture-backed safe-release mapping before using it.
 - `content-filter` — provider moderation blocked the request/output (rephrase).
 - `context-too-long` — conversation/attachment exceeded the model's context window
   (start a new chat / shorten). Distinct fix from `content-filter`.
@@ -571,8 +574,8 @@ a profile change applies from the next command.
 One turn in a conversation: a **role** (`user` / `assistant` / `system`) plus a
 list of **Content Parts**. It is **not** a single text field — a Message is a
 list of parts so it can carry text, images, and tool-call / tool-result parts
-together. This is the provider-agnostic multimodal + tool-use shape OpenAI and
-Anthropic both use, laid from day one so adding part kinds later (file) is
+together. This is the provider-agnostic multimodal + tool-use shape used by the
+OpenAI v1 adapter and suitable for future adapters, laid from day one so adding part kinds later (file) is
 non-breaking — the same "lay the optional shape early" discipline `record_transcribe`
 used for its Transcript segments/words.
 
@@ -655,7 +658,7 @@ Input.)
 A capability the **app** exposes to the bot — search a local DB for a period, create
 a mood card, write a product row, fill a table, etc. Declared as a name +
 description + a **portable v1 JSON Schema dialect** shared by the Dart Core,
-server and both provider translators (exact subset: SERVER-CONTRACT.md §7),
+server and OpenAI translator (exact subset: SERVER-CONTRACT.md §7),
 registered by the app on the Bot Profile. The Package carries the
 **mechanism** (declare → send to bot → recognise a call → hand it to the app →
 take the result back → continue); it **never implements or executes a Tool** — the
@@ -701,23 +704,22 @@ an app whose Tool has side effects MUST deduplicate by `toolCallId` (its
 idempotency key for tools). Exactly-once is not promised and not buildable
 from the Package's side.
 
-**Exits from `AwaitingTool` (never a dead end).** Three rules, each the
-providers' own standard:
+**Exits from `AwaitingTool` (never a dead end).** Three rules:
 - **Cancel works here too**: the user's stop → `Cancelled`, any first-leg
   partial text kept (the usual keep-partial rule); a tool-result the app
   returns *after* the terminal is silently ignored.
 - **A tool execution error is NOT a Failure**: the app returns a tool-result
   **flagged as an error** (`is_error`), it goes back to the bot, and the bot
-  decides how to react — the standard OpenAI/Anthropic mechanism. `Failed`
+  decides how to react — the standard OpenAI tool mechanism. `Failed`
   stays reserved for provider/transport causes; the cause catalogue gains no
   tool code.
 - **The Core keeps no tool timeout**: a Tool is app code — not hanging is the
-  app's responsibility (neither provider imposes a per-tool timeout either),
+  app's responsibility (OpenAI does not impose a per-tool timeout either),
   and the user always has the cancel exit above.
 
 **Loop guard (mechanism, not policy).** The Core caps the number of billable
 tool legs per reply — the app sets the cap, the default is **5** (the same
-guard the providers' own SDK runners use: `max_iterations`). Exceeding it
+`max_iterations` guard used by agent SDK runners). Exceeding it
 stops the loop on a terminal `Failed(tool-loop-limit)`; accumulated text is
 kept as usual (`interrupted`), so the app can offer regenerate. This is the
 guard against an endless bot→tool→bot loop spending money unattended.
@@ -730,9 +732,9 @@ in **this session**. It rides through the proxy **transiently** (like audio in
 to the provider's wire format (base64 inline or URL/file-id — both are standard).
 
 **Send discipline (defaults, app-tunable).** The Core always **resizes before
-sending**: long edge to **2048 px**, JPEG — above both providers' optimum (they
-downscale larger inputs anyway), so nothing is lost while a phone-camera
-original stops being wasted traffic and money. `maxImagesPerMessage` defaults to
+sending**: long edge to **2048 px**, JPEG — a practical cap for the configured
+OpenAI models, so a phone-camera original stops being wasted traffic and money.
+`maxImagesPerMessage` defaults to
 **4** and is enforced by the Core for every entry path; the Input Bar reads the
 same session setting (a widget-local override may only lower it). An image **with
 no text at all is a valid Message**. The numbers are code defaults (mechanism);

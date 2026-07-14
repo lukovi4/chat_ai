@@ -2,7 +2,7 @@
 
 A minimal **physical-device smoke** for the `chat_ai` package: it drives the
 **real** package widgets (`ChatMessageList`, `ChatInputBar`) and Core
-(`ChatSession` + `FirebaseChatBackend`) against a **deployed OpenAI-only smoke
+(`ChatSession` + `FirebaseChatBackend`) against the **deployed OpenAI-only v1 smoke
 endpoint**. It is **not** a production sample app — no router, no state
 framework, no persistence, no analytics, no fake mode, no direct OpenAI call.
 

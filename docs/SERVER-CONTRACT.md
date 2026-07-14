@@ -20,23 +20,27 @@ factory. See `docs/server-template.md` («Ownership and composition boundary») 
 the full rules. This split is a composition boundary only; it does not change the
 wire contract below.
 
+**v1 provider scope:** the shipped adapter is **OpenAI Responses only**.
+Anthropic is deferred to the product backlog and is not a v1 acceptance
+criterion. Throughout this document, Anthropic discriminator values and mapping
+details are reserved/future-adapter references only; they do not claim an
+installed SDK, dispatch path or supported v1 deployment option.
+
 ## 1. Provider normalisation happens on the server
 
-The proxy translates **OpenAI and Anthropic** into **one normalised SSE event
-stream** for the client. The Core knows only this normalised format, never a
+The v1 proxy translates **OpenAI Responses** into **one normalised SSE event
+stream** for the client. The Core knows only this normalised format, never the
 provider's raw wire shape — so the Core stays provider-agnostic (ADR 0001), and
-**adding or switching a provider is a server-only change** (no app release, matching
-the server-config choice in ADR 0001). The "dirty" translation work lives where the
-key lives. This normalisation covers **events** (§2), **error causes** (§2),
-**tool formats** (§7), and **token usage** (the providers report it differently —
-OpenAI in a final chunk, Anthropic split start/end — normalised into one count
-carried by each leg's terminal event, `tool_call` or `done`; §2).
+adding a future provider remains a server-only change. The "dirty" translation
+work lives where the key lives. This normalisation covers **events** (§2),
+**error causes** (§2), **tool formats** (§7), and **token usage**, carried by
+each leg's terminal event (`tool_call` or `done`; §2).
 
-**Pinned provider families for v1:**
+**Pinned provider family for v1: OpenAI Responses.**
 
-Both official provider SDK clients MUST be constructed with automatic retries
-disabled (`maxRetries: 0`, or the exact zero-retry option of the pinned SDK
-version). The proxy/Core retry contract is the only retry owner; an SDK must never
+The official OpenAI SDK client MUST be constructed with automatic retries
+disabled (`maxRetries: 0`). The proxy/Core retry contract is the only retry owner;
+an SDK must never
 repeat 5xx/timeouts invisibly underneath the idempotency record.
 
 - **OpenAI Responses API**, in manual/stateless mode: `store: false`, no
@@ -45,7 +49,7 @@ repeat 5xx/timeouts invisibly underneath the idempotency record.
   `include: ["reasoning.encrypted_content"]`, emits the complete opaque reasoning
   item as `provider_state`, and returns that item as input on the next matching
   OpenAI leg.
-- **Anthropic Messages API** with
+- **Future/backlog reference — not v1:** Anthropic Messages API with
   `anthropic-version: 2023-06-01`. Complete `thinking` and
   `redacted_thinking` blocks (including signatures) are emitted as
   `provider_state` and returned unmodified on the next matching Anthropic leg.
@@ -60,9 +64,9 @@ tier fails deployment.
 **System mapping is deterministic.** The proxy builds provider instructions from
 `BotProfile.systemPrompt` first and persisted `system` Messages in chronological
 order, then removes those Messages from ordinary history. OpenAI receives that
-sequence as Responses instructions/input system material; Anthropic receives it
-through the Messages `system` field. System Messages are never translated as
-ordinary user/assistant turns.
+sequence as Responses instructions/input system material. System Messages are
+never translated as ordinary user/assistant turns. A future provider adapter
+must preserve the same order.
 
 ## 2. The normalised SSE event stream (proxy → client)
 
@@ -90,7 +94,7 @@ Rules:
 - **`done` is the only proof of completion of the final leg.** A stream that
   ends without a terminal event is treated by the client as interrupted →
   `Failed(upstream)` (see Retry Boundary). This is the normalised equivalent
-  of OpenAI `[DONE]` / Anthropic `message_stop`.
+  of the OpenAI terminal response lifecycle.
 - **`Retry-After` has one wire per path**: pre-stream HTTP failures carry the
   standard `Retry-After` header; the in-stream `error` event carries
   `retryAfterMs`. The client maps both onto the same backoff input.
@@ -102,7 +106,7 @@ Rules:
 - **The proxy translates provider errors into the Package's machine cause codes**
   (`auth` / `entitlement` / `quota` / `rate` / `overloaded` / `content-filter` /
   `context-too-long` / `network` / `upstream`). The client never sees raw
-  OpenAI/Anthropic error text. An optional raw technical string may ride along for
+  provider error text. An optional raw technical string may ride along for
   logs only (never shown to the user). (The catalogue's tenth code,
   `tool-loop-limit`, is emitted by the client Core itself and never crosses
   the wire.)
@@ -239,12 +243,12 @@ standard for retry-safe LLM calls, and the same spine as `record_transcribe`.
   | proxy-local validation before provider call | no provider call; remove the newly claimed record |
   | DNS/TCP/TLS connect failure with proof that zero request bytes were written | release |
   | OpenAI HTTP `429` recognised by the pinned adapter as a retryable rate-limit response (not provider-credit/insufficient-quota) | `rate` + release |
-  | Anthropic HTTP `429` + `rate_limit_error` | `rate` + release |
-  | Anthropic HTTP `529` + `overloaded_error` | `overloaded` + release |
+  | future/backlog Anthropic `429` + `rate_limit_error` | reserved mapping; not active in v1 |
+  | future/backlog Anthropic `529` + `overloaded_error` | reserved mapping; not active in v1 |
   | generic `500/502/504`, unknown `5xx`, timeout/reset after any request byte, break before headers, mid-stream failure, cancel/disconnect after upstream start | `aborted` |
 
-  These are the only provider-response release cases in v1 because the providers
-  explicitly recommend retrying them. Adapter fixtures pin the exact structured
+  The OpenAI 429 row is the only active provider-response release case in v1;
+  OpenAI explicitly recommends retrying it. Adapter fixtures pin the exact structured
   shapes; a bare/unknown 429, any wildcard 5xx, or a newly observed code defaults
   to `aborted` until the canonical allowlist is deliberately updated. A released
   key becomes unknown and may run under the same-key silent retry; an ambiguous
@@ -394,13 +398,14 @@ formats so the Core stays provider-agnostic (same principle as §1).
 
 - **Declaration format:** the client sends `name`, `description` and
   `parameters` in the closed **Chat AI Tool Schema v1** dialect below. The proxy
-  maps the same schema to OpenAI function `parameters` and Anthropic
-  `input_schema`, with provider strict mode enabled.
+  maps the schema to OpenAI function `parameters`, with strict mode enabled. A
+  future provider adapter must consume the same client dialect unchanged.
 
 ### Chat AI Tool Schema v1 (canonical portable dialect)
 
 This is the only schema language accepted by the Dart Core, TypeScript BFF and
-both provider translators in v1:
+OpenAI translator in v1. A future provider adapter must pass the same corpus
+before support is declared:
 
 - Tool `name` matches `^[A-Za-z0-9_-]{1,64}$`; names are unique within one
   frozen Bot Profile.
@@ -422,7 +427,7 @@ both provider translators in v1:
   `uniqueItems`, `patternProperties`, and schema-valued/true
   `additionalProperties`.
 
-The proxy sends `strict: true` to both providers. It never relies on an SDK to
+The proxy sends `strict: true` to OpenAI. It never relies on an SDK to
 silently transform or drop unsupported keywords. The Core validates declarations
 on `ChatSession` construction and `botProfile` assignment; invalid name,
 duplicate name or invalid dialect throws `ArgumentError` (setter leaves the old
@@ -431,8 +436,9 @@ idempotency claim/provider dispatch.
 
 One shared fixture corpus is normative:
 `test/contract_fixtures/tool_schema_v1/` contains accepted/rejected schemas and
-valid/invalid argument instances. Dart and TypeScript validators, plus both
-translator contract tests, MUST produce the same verdict for every fixture.
+valid/invalid argument instances. Dart and TypeScript validators, plus the
+OpenAI translator contract tests, MUST produce the same verdict for every
+fixture. A future provider adapter must pass the same corpus before release.
 - **Argument assembly is the server's job.** Providers stream tool-call arguments as
   JSON **fragments that don't respect JSON boundaries** (a chunk can end mid-string).
   The proxy **buffers fragments until the call closes, parses the JSON, checks the
@@ -442,10 +448,9 @@ translator contract tests, MUST produce the same verdict for every fixture.
   safe `is_error` ToolResult; it is never passed to the app resolver. The Core
   repeats the declaration/schema check as the trust boundary for any backend/Fake.
   Half-parsed/non-JSON arguments emit `error(upstream)`, never a partial call.
-- **v1 disables parallel tool calls.** Both providers send multiple calls per
-  reply **by default**; the proxy MUST pass the provider's own switch
-  (`parallel_tool_calls: false` on OpenAI, `disable_parallel_tool_use: true` on
-  Anthropic) so that a leg carries at most **one** `tool_call` — the "single
+- **v1 disables parallel tool calls.** OpenAI may send multiple calls per reply;
+  the proxy MUST pass `parallel_tool_calls: false` so that a leg carries at most
+  **one** `tool_call` — the "single
   `tool_call` event" rule above holds by construction, and the Core's
   one-call-at-a-time `AwaitingTool` never desynchronises from the bot.
   Multiple-call support is v2 and extends the form without breaking it
@@ -464,12 +469,14 @@ translator contract tests, MUST produce the same verdict for every fixture.
   carries `content` + `isError`. OpenAI Responses has no native `is_error`, so
   the proxy encodes the pair as a **compact JSON string**
   `{"content":<string>,"isError":<bool>}` (keys in that order) in
-  `function_call_output.output`. Anthropic instead uses native
-  `tool_result.content` + `is_error`. The client/wire ToolResult shape is
-  unchanged.
+  `function_call_output.output`. A future Anthropic adapter must map the
+  unchanged client/wire ToolResult shape to its native result form.
 - The server **never executes a Tool** — execution is always app code.
 
-### Provider translation matrix (v1)
+### Provider translation matrix (OpenAI v1; Anthropic backlog reference)
+
+Only the OpenAI column is normative for v1. The Anthropic column is retained as
+a non-normative backlog design note and does not imply current support.
 
 | Normalised concept | OpenAI Responses API | Anthropic Messages API |
 |---|---|---|
@@ -582,12 +589,11 @@ logs-only.
 | Firebase id-token invalid/expired; App Check rejected | `auth` (detail: `id-token` / `app-check`) |
 | Requested tier not allowed for this user (tier→model check, §4) | `entitlement` |
 | The app's own per-user allowance exhausted (server-side books, §9) | `quota` |
-| Anthropic `429` + `rate_limit_error`; pinned OpenAI retryable rate-limit `429` excluding insufficient-quota/credit errors | `rate`, relay `Retry-After`, release per §6 |
-| Anthropic `529` + `overloaded_error` | `overloaded`, release per §6 |
+| Pinned OpenAI retryable rate-limit `429` excluding insufficient-quota/credit errors | `rate`, relay `Retry-After`, release per §6 |
 | OpenAI `response.failed` with documented `server_error`; OpenAI HTTP `503` | `upstream`, not `overloaded`; aborted. v1 has no documented OpenAI overload code that is safe to release |
 | Provider moderation / content-filter block; refusal stop reason | `content-filter` |
-| Provider context-length error (OpenAI `context_length_exceeded`, Anthropic "prompt is too long"); request body over the payload limit (`413`) | `context-too-long` |
-| **Deployer's provider-key problem** (OpenAI `insufficient_quota`, Anthropic credit exhausted, invalid key) — the deployer's issue, not the end user's | `upstream` |
+| OpenAI `context_length_exceeded`; request body over the payload limit (`413`) | `context-too-long` |
+| **Deployer's OpenAI-key problem** (`insufficient_quota`, invalid key) — the deployer's issue, not the end user's | `upstream` |
 | Generic provider `500/502/504`, unknown `5xx`, any other provider `4xx/5xx`, mid-stream provider error, unknown stop reason, stream ended without a terminal event | `upstream`; ambiguous attempts become `aborted` |
 | **Proxy→provider connect failure before the request bytes were written** (DNS / TCP / TLS) — provably unbilled, the key is **released** (§6) | `network` |
 | **Proxy→provider timeout/reset after the request bytes were written** — ambiguous outcome, the record becomes `aborted` (§6) | `upstream` |
@@ -595,6 +601,10 @@ logs-only.
 | Unsupported/missing `wireVersion` (`426`); local request/tool validation failure before provider call | `upstream` (no provider call; no retained key for pre-claim validation) |
 | Client-side transport failure — no connection, DNS, TLS, socket drop with no response (mapped by the **client**, not the proxy) | `network` |
 | Tool Use Cycle exceeded the leg cap (emitted by the **client Core**, never crosses the wire) | `tool-loop-limit` |
+
+`overloaded` remains a stable provider-neutral client cause, but the v1 OpenAI
+adapter has no documented overload response that is safe to release and does not
+emit it. A future provider adapter must define and fixture its own exact mapping.
 
 **Protocol signals that are NOT Failure causes** (handled by the client per
 §6, surfaced as a Failure only when the §6 rules say terminal):
@@ -631,9 +641,7 @@ the elapsed deadline and stops.
 - [OpenAI function calling strict-mode requirements](https://developers.openai.com/api/docs/guides/function-calling#strict-mode)
 - [OpenAI data controls by endpoint](https://platform.openai.com/docs/models/default-usage-policies-by-endpoint)
 - [OpenAI 429 retry/backoff guidance](https://help.openai.com/en/articles/5955604-how-can-i-solve-429-too-many-requests-errors)
-- [Anthropic extended thinking and tool-use preservation](https://platform.claude.com/docs/en/build-with-claude/extended-thinking)
-- [Anthropic strict tool use](https://platform.claude.com/docs/en/agents-and-tools/tool-use/strict-tool-use)
-- [Anthropic typed API errors](https://platform.claude.com/docs/en/api/errors)
+- Backlog reference only (not v1): [Anthropic extended thinking and tool-use preservation](https://platform.claude.com/docs/en/build-with-claude/extended-thinking), [strict tool use](https://platform.claude.com/docs/en/agents-and-tools/tool-use/strict-tool-use), [typed API errors](https://platform.claude.com/docs/en/api/errors)
 - [Firestore document limits](https://firebase.google.com/docs/firestore/quotas)
 - [Cloud Run functions quotas (10 MB streaming response)](https://docs.cloud.google.com/functions/quotas)
 - [Cloud Storage lifecycle behaviour](https://docs.cloud.google.com/storage/docs/lifecycle)
