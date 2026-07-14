@@ -19,7 +19,7 @@ Manager. This harness only holds a Firebase id-token + App Check token.
 
 - iOS bundle id / Android application id: **`com.chataismoke.example`** (register
   both in the smoke Firebase project).
-- iOS deployment target: **18.0**. Android `minSdk`: **36**.
+- iOS deployment target: **18.0**. Android `minSdk`: **34**.
 
 ## Configuration — compile-time defines only (config-free)
 

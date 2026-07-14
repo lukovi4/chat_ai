@@ -36,9 +36,9 @@ follow directly.
 
 ## 1. Platforms
 
-- **iOS 18+**, **Android 16 (API 36)+**. Same deliberately high floor as the
-  sibling kit (personal apps, small audience): fewer legacy workarounds,
-  current platform APIs.
+- **iOS 18+**, **Android 14 (API 34)+**. API 34 is the minimum supported
+  Android version for v1; older Android releases stay out of scope (personal
+  apps, small audience: fewer legacy workarounds, current platform APIs).
 - iOS+Android only — no web, no desktop.
 - **The package requests zero permissions.** Photos come through the app's
   own picker (`onAttach` callback), voice through the app's own

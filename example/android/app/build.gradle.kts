@@ -17,8 +17,8 @@ android {
     defaultConfig {
         // TODO: Specify your own unique Application ID (https://developer.android.com/studio/build/application-id.html).
         applicationId = "com.chataismoke.example"
-        // Smoke harness floors (task): Android minSdk 36.
-        minSdk = 36
+        // Smoke harness floors (task): Android minSdk 34.
+        minSdk = 34
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
