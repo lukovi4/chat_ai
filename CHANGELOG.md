@@ -1,10 +1,10 @@
 # Changelog
 
-## Unreleased
+## 1.0.0 - 2026-07-15
 
-First v1 scope of the `chat_ai` chat-with-AI kit — a private git dependency, not
-published to pub.dev. Not yet tagged as a release: no version bump and no release
-tag have been cut.
+First v1 release of the `chat_ai` chat-with-AI kit — a private git dependency,
+not published to pub.dev. This initial OpenAI-only v1 is versioned 1.0.0 and
+prepared for its release tag.
 
 ### Included
 - **ChatSession Core** — one open conversation per session: one-reply-at-a-time

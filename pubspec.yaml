@@ -3,7 +3,7 @@ description: >-
   A canonical Flutter chat-with-AI kit: one open conversation per session,
   streaming replies over a pluggable backend, tool use, and chat widgets.
   Private git dependency, not published.
-version: 0.1.0
+version: 1.0.0
 publish_to: none
 
 environment:
