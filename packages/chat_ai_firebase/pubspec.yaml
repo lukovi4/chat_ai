@@ -1,0 +1,34 @@
+name: chat_ai_firebase
+description: >-
+  Firebase adapter for chat_ai: the production FirebaseChatBackend transport —
+  one POST per send over dio with an SSE reply stream, Firebase id-token +
+  App Check attestation headers (V1_SPEC §8, SERVER-CONTRACT).
+  Private git dependency, not published.
+version: 0.1.0
+publish_to: none
+
+environment:
+  sdk: ^3.12.0
+  flutter: ">=3.44.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # The backend/event contracts this package implements (ChatBackend,
+  # ChatRequest, BackendEvent, models). The core package at the root of
+  # this same repository, path-resolved.
+  chat_ai:
+    path: ../..
+
+  # Transport: HTTP + SSE stream, auth token, attestation (V1_SPEC §2, §8).
+  # firebase_core deliberately NOT direct: the consuming app initializes
+  # Firebase; it arrives transitively via FlutterFire.
+  dio: ^5.10.0
+  firebase_app_check: ^0.4.5+2
+  firebase_auth: ^6.5.6
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0

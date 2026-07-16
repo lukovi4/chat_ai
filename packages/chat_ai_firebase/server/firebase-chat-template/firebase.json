@@ -1,0 +1,17 @@
+{
+  "_comment": "Reusable Cloud Functions gen2 template config. Deliberately carries NO project id / .firebaserc, NO host-app Firestore rules pointer (deploy must never overwrite a host app's rules), and NO secrets. Deployable output is lib/ (built by predeploy). See DEPLOY_SMOKE.md.",
+  "functions": {
+    "source": ".",
+    "runtime": "nodejs24",
+    "predeploy": ["npm --prefix \"$RESOURCE_DIR\" run build"],
+    "ignore": [
+      "node_modules",
+      ".git",
+      "src",
+      "test",
+      "*.log",
+      "example",
+      "DEPLOY_SMOKE.md"
+    ]
+  }
+}

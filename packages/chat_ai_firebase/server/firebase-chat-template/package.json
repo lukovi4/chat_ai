@@ -1,0 +1,27 @@
+{
+  "name": "firebase-chat-template",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Deployable Cloud Functions gen2 BFF template for the OpenAI-only chat_ai v1: package-owned runtime plus an app-owned smoke composition root. Anthropic is product backlog.",
+  "license": "UNLICENSED",
+  "main": "lib/index.js",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "firebase-admin": "13.10.0",
+    "firebase-functions": "^7.2.5",
+    "openai": "^6.46.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.1",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.10"
+  }
+}

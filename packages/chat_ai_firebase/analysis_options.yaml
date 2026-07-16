@@ -1,0 +1,18 @@
+include: package:flutter_lints/flutter.yaml
+
+analyzer:
+  exclude:
+    - "**/*.freezed.dart"
+    - "**/*.g.dart"
+    # The nested example app builds into this package's build/ (Flutter's
+    # layout for example apps), including SwiftPM checkouts of third-party
+    # plugin sources — never analyze those artifacts.
+    - "build/**"
+  language:
+    strict-casts: true
+    strict-raw-types: true
+
+linter:
+  rules:
+    - prefer_final_locals
+    - require_trailing_commas

@@ -1,0 +1,36 @@
+name: example
+description: "chat_ai OpenAI-only smoke harness — physical-device test of the real package widgets against a deployed smoke endpoint. Not a production sample app."
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: ^3.12.2
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # The packages under test — the real widgets/Core and the Firebase
+  # transport adapter, never a fork.
+  chat_ai:
+    path: ../../..
+  chat_ai_firebase:
+    path: ../
+
+  # Firebase attestation for the live smoke path (no provider key on device).
+  firebase_core: ^4.12.1
+  firebase_auth: ^6.5.6
+  firebase_app_check: ^0.4.5+2
+
+  # Image attachment via the Core's OnAttach.
+  image_picker: ^1.2.3
+
+  cupertino_icons: ^1.0.8
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true
