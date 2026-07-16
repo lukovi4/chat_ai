@@ -12,7 +12,8 @@ resend of a `failed` user Message, and recovery-first regenerate of an
 `interrupted` reply — carries the persisted key. This supersedes the original
 content-derived design ("a hash of the
 assembled context + Bot Profile + conversation id") in earlier revisions of
-CONTEXT.md / SERVER-CONTRACT.md §6.
+CONTEXT.md / SERVER-CONTRACT.md §6 (the latter now ships with the Firebase
+adapter: `packages/chat_ai_firebase/docs/`).
 
 This is the industry pattern: Stripe's official docs have the **client**
 generate the key and "suggest using V4 UUIDs, or another random string with

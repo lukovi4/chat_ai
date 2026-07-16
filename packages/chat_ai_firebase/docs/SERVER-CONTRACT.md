@@ -403,42 +403,22 @@ formats so the Core stays provider-agnostic (same principle as §1).
 
 ### Chat AI Tool Schema v1 (canonical portable dialect)
 
-This is the only schema language accepted by the Dart Core, TypeScript BFF and
-OpenAI translator in v1. A future provider adapter must pass the same corpus
-before support is declared:
+The normative dialect definition lives in the core:
+[`docs/TOOL-SCHEMA-V1.md`](../../../docs/TOOL-SCHEMA-V1.md) at the repo root.
+It is the only schema language accepted by the Dart Core, this TypeScript BFF
+and the OpenAI translator in v1, and the repo-root fixture corpus
+`test/contract_fixtures/tool_schema_v1/` referenced there is the single
+normative verdict source — read in place, never copied. Dart and TypeScript
+validators, plus the OpenAI translator contract tests, MUST produce the same
+verdict for every fixture; a future provider adapter must pass the same
+corpus before support is declared.
 
-- Tool `name` matches `^[A-Za-z0-9_-]{1,64}$`; names are unique within one
-  frozen Bot Profile.
-- `parameters` root is always `{ "type": "object", ... }`.
-- Allowed keywords are only `type`, `description`, `enum`, `properties`,
-  `required`, `additionalProperties` and `items`.
-- Allowed scalar types are `string`, `number`, `integer`, `boolean` and `null`;
-  compound types are `object` and `array`.
-- Every object declares `properties`, lists **every** property name in
-  `required`, and sets `additionalProperties: false`. A semantically optional
-  value is represented as required-but-nullable with
-  `"type": ["<one non-null type>", "null"]`.
-- An array has exactly one `items` schema. `enum` contains JSON scalar values
-  compatible with the declared scalar type; a nullable enum includes `null`.
-  Nested objects/arrays recursively follow the same rules.
-- Everything else is rejected in v1, including `$schema`, `$id`, `$ref`,
-  `$defs`, `const`, `default`, `oneOf`, `anyOf`, `allOf`, `not`, conditional
-  schemas, `pattern`, `format`, length/range/item-count constraints,
-  `uniqueItems`, `patternProperties`, and schema-valued/true
-  `additionalProperties`.
-
-The proxy sends `strict: true` to OpenAI. It never relies on an SDK to
-silently transform or drop unsupported keywords. The Core validates declarations
-on `ChatSession` construction and `botProfile` assignment; invalid name,
-duplicate name or invalid dialect throws `ArgumentError` (setter leaves the old
-profile unchanged, with no key/backend call). The BFF repeats validation before
-idempotency claim/provider dispatch.
-
-One shared fixture corpus is normative: the repo-root
-`test/contract_fixtures/tool_schema_v1/` contains accepted/rejected schemas and
-valid/invalid argument instances. Dart and TypeScript validators, plus the
-OpenAI translator contract tests, MUST produce the same verdict for every
-fixture. A future provider adapter must pass the same corpus before release.
+Server-side enforcement: the proxy sends `strict: true` to OpenAI. It never
+relies on an SDK to silently transform or drop unsupported keywords. The Core
+validates declarations on `ChatSession` construction and `botProfile`
+assignment; invalid name, duplicate name or invalid dialect throws
+`ArgumentError` (setter leaves the old profile unchanged, with no key/backend
+call). The BFF repeats validation before idempotency claim/provider dispatch.
 - **Argument assembly is the server's job.** Providers stream tool-call arguments as
   JSON **fragments that don't respect JSON boundaries** (a chunk can end mid-string).
   The proxy **buffers fragments until the call closes, parses the JSON, checks the

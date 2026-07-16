@@ -1,9 +1,0 @@
-{
-  "_comment": "Sample Cloud Storage lifecycle for the PRIVATE replay bucket (chat-replays). Deletes any object older than 1 day — the terminal replay TTL is 600 s, so a 1-day floor only reaps orphans/leftovers. Firestore logical expiry is authoritative before any read; this lifecycle is cleanup only. Apply to a dedicated smoke bucket only: gcloud storage buckets update gs://<your-replay-bucket> --lifecycle-file=replay-bucket-lifecycle.json",
-  "rule": [
-    {
-      "action": { "type": "Delete" },
-      "condition": { "age": 1 }
-    }
-  ]
-}

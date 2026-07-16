@@ -5,7 +5,7 @@ part 'tool.freezed.dart';
 /// One Tool declaration the bot may call (V1_SPEC §5, ADR 0003/0005).
 ///
 /// [parameters] is a JSON Schema in exactly the portable **Chat AI Tool
-/// Schema v1** dialect (SERVER-CONTRACT §7). Schema/name validation is a
+/// Schema v1** dialect (docs/TOOL-SCHEMA-V1.md). Schema/name validation is a
 /// session-construction guard (`ArgumentError`, V1_SPEC §3/§5) and ships with
 /// the ChatSession increment — this value object carries the declaration.
 @freezed

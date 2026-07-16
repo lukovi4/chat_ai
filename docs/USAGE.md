@@ -1,11 +1,13 @@
 # Usage
 
 A practical guide to using `chat_ai`. Design rationale and exact contracts live
-in `V1_SPEC.md`, `docs/CONTEXT.md`, and `docs/SERVER-CONTRACT.md`; this file
-answers “how do I wire it into an app?”.
+in `V1_SPEC.md` and `docs/CONTEXT.md`; this file answers “how do I wire it
+into an app?”.
 
-> **Status:** OpenAI-only v1. The Flutter Core, production backend, server
-> template, fake backend, and widgets are implemented. Anthropic is backlog and
+> **Status:** OpenAI-only v1. The Flutter Core, fake backend, and widgets are
+> implemented. Production transports live in the companion adapter packages of
+> this repository — `chat_ai_firebase` and `chat_ai_openai_realtime` — and an
+> app depends on the core plus exactly one adapter. Anthropic is backlog and
 > is not a v1 deployment option.
 
 ## 1. What it is
@@ -30,7 +32,9 @@ picker, dictation/voice stack, and all user-facing strings.
 
 ## 2. Install
 
-The package is private and is not published to pub.dev:
+The packages are private and are not published to pub.dev. An app declares
+the core plus exactly one companion adapter from the same repository — both
+pinned to **one and the same full 40-character commit SHA**:
 
 ```yaml
 # consuming app pubspec.yaml
@@ -38,22 +42,44 @@ dependencies:
   chat_ai:
     git:
       url: <private git url>
-      ref: main # prefer a release tag when one exists
+      ref: <full-40-character-commit-sha>
 
-  # Declare these directly when the app imports/initializes Firebase itself.
-  firebase_core: ^4.12.1
-  firebase_auth: ^6.5.6
-  firebase_app_check: ^0.4.5+2
+  # Exactly one adapter — Firebase-backed apps:
+  chat_ai_firebase:
+    git:
+      url: <private git url>              # the same repository
+      ref: <full-40-character-commit-sha> # the SAME full SHA as chat_ai
+      path: packages/chat_ai_firebase
+  # …or OpenAI Realtime apps (Solomon):
+  # chat_ai_openai_realtime:
+  #   git:
+  #     url: <private git url>
+  #     ref: <full-40-character-commit-sha>
+  #     path: packages/chat_ai_openai_realtime
 ```
 
+> **The `ref` must be the full 40-character commit SHA — never a branch, a
+> tag or a shortened SHA.** The adapter depends on the core through a
+> package-local relative `path: ../..`, which Pub normalizes to the fully
+> resolved commit SHA of the repository. A direct app dependency written as
+> a branch (`main`), a tag or a short SHA is a *different source
+> description*, and Pub may fail version solving with it even though it
+> points at the same commit. A convenient tag-based release scheme is a
+> separate Increment 4 decision and is deliberately not designed here.
+
 Then run `flutter pub get`. Generated model files already ship in the package;
-the consuming app does not run `build_runner` for `chat_ai`.
+the consuming app does not run `build_runner` for `chat_ai`. Adapter-specific
+dependencies (FlutterFire for `chat_ai_firebase`) are covered by each
+adapter's own USAGE document.
 
 ## 3. Imports
 
 ```dart
 // Production/app code.
 import 'package:chat_ai/chat_ai.dart';
+// The transport comes from the chosen adapter package:
+import 'package:chat_ai_firebase/chat_ai_firebase.dart';
+// …or: import 'package:chat_ai_openai_realtime/chat_ai_openai_realtime.dart';
 
 // Tests only.
 import 'package:chat_ai/testing.dart';
@@ -66,62 +92,33 @@ of the production API.
 
 End-to-end setup for each consuming app:
 
-1. Add `chat_ai` as a pinned `git:` dependency and run `flutter pub get`.
-2. Create/configure the app in its own Firebase project. Add the app-owned
-   native config files or generated `firebase_options.dart`; the package ships
-   no Firebase project configuration.
-3. Initialize Firebase before creating a live chat session.
-4. Activate production App Check providers. Debug providers are only for the
-   dedicated smoke harness.
-5. Sign a Firebase Auth user in. Anonymous sign-in is acceptable only when it
-   matches the app's product policy and is enabled in Firebase.
-6. Copy/deploy `server/firebase-chat-template` into that app's Firebase project.
-   Replace the included smoke composition with app-owned production hooks and
-   configuration; follow its README and `docs/server-template.md`.
-7. Set `OPENAI_API_KEY` as a Firebase Secret. Never put it in Flutter code,
-   `dart-define`, native Firebase config, logs, or source control.
-8. Configure the server's tier for the `BotProfile.id` the app sends. The id is
-   a server tier request, not a raw OpenAI model name.
-9. Give the function a private replay bucket, Firestore/TTL, required IAM, and
-   the four real app hooks: entitlement, rate limit, quota reservation, and
-   quota settlement.
-10. Pass the deployed HTTPS endpoint to `FirebaseChatBackend`.
-11. If chats survive app restarts, provide a `checkpoint` that durably stores
-    every snapshot before a billable dispatch.
-12. Dispose the session when its screen/flow ends.
+1. Add `chat_ai` plus exactly one adapter as pinned `git:` dependencies and
+   run `flutter pub get`.
+2. Complete the chosen adapter's own setup:
+   - `chat_ai_firebase` — Firebase project, initialization, Auth, App Check,
+     the deployed server template and the endpoint: see
+     `packages/chat_ai_firebase/docs/USAGE.md`;
+   - `chat_ai_openai_realtime` — the app-implemented `ClientSecretProvider`
+     and the backend that mints ephemeral client secrets: see
+     `packages/chat_ai_openai_realtime/README.md`.
+3. If chats survive app restarts, provide a `checkpoint` that durably stores
+   every snapshot before a billable dispatch.
+4. Dispose the session when its screen/flow ends.
 
-Typical app startup:
-
-```dart
-WidgetsFlutterBinding.ensureInitialized();
-
-await Firebase.initializeApp(
-  options: DefaultFirebaseOptions.currentPlatform,
-);
-
-await FirebaseAppCheck.instance.activate(
-  providerAndroid: const AndroidPlayIntegrityProvider(),
-  providerApple: const AppleAppAttestWithDeviceCheckFallbackProvider(),
-);
-
-// Or use the app's real sign-in flow.
-if (FirebaseAuth.instance.currentUser == null) {
-  await FirebaseAuth.instance.signInAnonymously();
-}
-```
-
-`FirebaseChatBackend` reads the current Firebase ID token and App Check token
-for every request. It does not initialize Firebase itself.
-
-The included `example/` uses debug attestation and compile-time defines for a
-throwaway smoke project. Do not copy those debug choices into production.
+No provider key is ever placed in Flutter code or device configuration —
+where the key lives (server Secret Manager, ephemeral credentials) is each
+adapter's contract.
 
 ## 5. Create a ChatSession
 
 ```dart
+// The adapter choice is exactly one line — everything below is identical.
 final backend = FirebaseChatBackend(
   'https://<region>-<project>.cloudfunctions.net/chat',
 );
+// …or: final backend = OpenAIRealtimeChatBackend(
+//   clientSecretProvider: myProvider,
+// );
 
 final session = ChatSession(
   backend: backend,
@@ -143,7 +140,7 @@ Constructor options:
 
 | Option | Meaning | Default |
 |---|---|---|
-| `backend` | One-leg transport. Use `FirebaseChatBackend` in production. | required |
+| `backend` | One-leg transport. Use the chosen adapter's backend in production. | required |
 | `botProfile` | Server tier id, system prompt, and Tool declarations. | required |
 | `onToolCall` | App Tool resolver. Required when `tools` is non-empty. | `null` |
 | `history` | Restored schema-v1 conversation. | new conversation |
@@ -449,8 +446,9 @@ Recovery behaviour:
   keeps its already-processed images, and sends under a fresh key. The app owns
   any confirmation/copy-before-truncate UI.
 - `cancel()` closes the client stream, lands on `Cancelled`, keeps visible
-  partial text, and ignores late events. The server-side upstream abort is
-  best-effort; idempotency/replay protects explicit recovery.
+  partial text, and ignores late events. The backend-side upstream abort is
+  best-effort; where the backend provides idempotency/replay
+  (`chat_ai_firebase`), it protects explicit recovery.
 
 The Core silently retries only safe pre-token `rate`, `overloaded`, and
 `network` failures within `retryDeadline`. It never silently retries after
@@ -458,7 +456,8 @@ visible output.
 
 ## 13. Fake backend in tests
 
-`FakeChatBackend` drives the real Core without Firebase, network, or paid calls:
+`FakeChatBackend` drives the real Core without a transport, network, or paid
+calls:
 
 ```dart
 import 'package:chat_ai/chat_ai.dart';
@@ -544,7 +543,9 @@ Calling commands after disposal is a programming error and throws `StateError`.
 
 ## 16. Rules to follow
 
-- The OpenAI key is never on the device. Flutter talks only to the app's BFF.
+- The provider key is never on the device. Flutter talks only to the app's
+  chosen backend (the BFF proxy of `chat_ai_firebase`, or ephemeral
+  credentials with `chat_ai_openai_realtime`).
 - Use `ChatSession` for app chat flow; calling a raw `ChatBackend` directly
   bypasses context, retry, recovery, state, checkpoints, Tools, and image work.
 - One session equals one open conversation; there is no command queue.
@@ -553,8 +554,6 @@ Calling commands after disposal is a programming error and throws `StateError`.
 - Deduplicate side-effecting Tools by `ToolCall.id`.
 - Localize `FailureCause`; never show `developerDetail`.
 - Dispose every session.
-- Keep production business hooks fail-closed; the smoke hooks are not product
-  policy.
 - Do not rely on v2/backlog behaviour until its contract is explicitly added.
 
 ## 17. Further references
@@ -562,8 +561,7 @@ Calling commands after disposal is a programming error and throws `StateError`.
 - [Package overview](../README.md)
 - [Public v1 contract](../V1_SPEC.md)
 - [Domain model](CONTEXT.md)
-- [Server/wire contract](SERVER-CONTRACT.md)
+- [Tool Schema v1](TOOL-SCHEMA-V1.md)
 - [Widget specification](widgets-spec.md)
-- [Server template guide](server-template.md)
-- [Server template README](../server/firebase-chat-template/README.md)
-- [Physical-device smoke](../example/README.md)
+- [Firebase adapter — setup, wire contract, server template](../packages/chat_ai_firebase/docs/USAGE.md)
+- [OpenAI Realtime adapter](../packages/chat_ai_openai_realtime/README.md)

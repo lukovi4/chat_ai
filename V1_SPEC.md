@@ -1,8 +1,9 @@
 # V1 Spec — Chat AI Kit
 
 The technical specification for **v1** of the package. It turns the domain model
-(CONTEXT.md), the decisions (docs/adr), the server contract (SERVER-CONTRACT.md)
-and the surface specs (docs/widgets-spec.md, docs/server-template.md) into
+(CONTEXT.md), the decisions (docs/adr), the Firebase server contract
+(`packages/chat_ai_firebase/docs/SERVER-CONTRACT.md`) and the surface specs
+(docs/widgets-spec.md, `packages/chat_ai_firebase/docs/server-template.md`) into
 concrete API shapes, defaults, and a test contract that implementation can
 follow directly.
 
@@ -53,16 +54,14 @@ claim an installed SDK, working dispatch path or v1 support.
 
 ## 2. Dependencies (all internal to the package)
 
-The app does **not** see these except Firebase (which the app initializes
-itself). Policy: **maintained, current packages only** — verified against
-pub.dev at spec time (2026-07-10).
+The app does **not** see these. The core carries **no transport dependency**:
+Firebase/dio/SSE live in the `chat_ai_firebase` adapter and WebRTC in the
+`chat_ai_openai_realtime` adapter — each with its own dependency table.
+Policy: **maintained, current packages only** — verified against pub.dev at
+spec time (2026-07-10).
 
 | Purpose | Package | Note |
 |---------|---------|------|
-| HTTP + SSE stream | `dio` (`ResponseType.stream`) | same as the sibling kit; `CancelToken` = wire-cancel ("closing the connection", SERVER-CONTRACT §3); interceptor attaches auth headers |
-| SSE parsing | **own ~50-line parser** | `data:`-line format is trivial; existing Flutter SSE packages are half-alive — a dependency costs more than 50 lines |
-| Auth token | `firebase_auth` | contract §4 |
-| Anti-abuse attestation | `firebase_app_check` | contract §4 |
 | Sealed unions + value models (codegen) | `freezed` | Conversation State phases and the 10 Failure causes are sealed unions |
 | Idempotency-Key | `uuid` | random V4 per attempt (ADR 0004) |
 | Image resize | `image` (pure Dart) | 2048 px JPEG re-encode in an isolate (`compute`); no platform plugins |
@@ -91,7 +90,11 @@ dispose the old session, construct a new one — cheap, and idiomatic Flutter
 
 ```dart
 final session = ChatSession(
-  backend: FirebaseChatBackend(...),   // or FakeChatBackend() in tests
+  backend: backend,                    // the app-supplied ChatBackend: the
+                                       //   chosen adapter's transport
+                                       //   (chat_ai_firebase /
+                                       //   chat_ai_openai_realtime), or
+                                       //   FakeChatBackend() in tests
   botProfile: BotProfile(...),         // {id, systemPrompt, tools} — ADR 0005
   onToolCall: ...,                     // the app's tool resolver — see the
                                        //   tools⇄resolver guard below
@@ -117,7 +120,7 @@ session.botProfile = otherBot;  // mutable: "switching bots is just the next
 
 // Tool configuration guards (loud configuration errors): a session can never
 // hold tools without a resolver, duplicate/invalid Tool names, or a schema
-// outside SERVER-CONTRACT §7's Chat AI Tool Schema v1 dialect.
+// outside the Chat AI Tool Schema v1 dialect (docs/TOOL-SCHEMA-V1.md).
 // CONSTRUCTOR/setter throw ArgumentError on a violation; the setter leaves the
 // old profile unchanged, with no backend call or Idempotency-Key.
 
@@ -514,36 +517,30 @@ key/backend work. Dart and TypeScript consume the same normative
 
 ## 6. Wire formats (exact shapes)
 
-SERVER-CONTRACT.md defines the rules; this section pins the bytes. JSON keys
-are camelCase; cause codes are the kebab-case strings of CONTEXT.md §Failure.
+The core pins the transport-neutral shapes: the frozen `ChatRequest` (§8),
+the rules of context assembly and the protocol-signal semantics below. How a
+`ChatRequest` rides a concrete transport is each adapter's contract — the
+exact Firebase HTTP JSON/SSE byte shapes that used to live in this section
+moved unchanged to
+**`packages/chat_ai_firebase/docs/WIRE-FORMATS.md`**. JSON keys are
+camelCase; cause codes are the kebab-case strings of CONTEXT.md §Failure.
 
-### Request (client → proxy), one endpoint
+### Request (client → backend)
 
-```
-POST <deployed function URL>
-Authorization: Bearer <Firebase id-token>
-X-Firebase-AppCheck: <App Check token>
-Idempotency-Key: <UUID v4>            // per attempt / per leg — ADR 0004
-Content-Type: application/json
-
-{
-  "wireVersion": 1,
-  "botId": "premium",                 // Bot Profile id — a *request* (§4)
-  "system": "<systemPrompt>",
-  "messages": [ …assembled context… ],
-  "tools": [ {"name": …, "description": …, "parameters": {…}} ]  // omit if none
-}
-```
+Every leg dispatches one frozen `ChatRequest` (§8) — on the Firebase wire it
+becomes one POST with the `Idempotency-Key` header (see the adapter doc).
+Its rules:
 
 - `messages` reuse the **storage JSON of `Message`** (§5) — one serializer,
-  no second mapper. The proxy ignores client-only fields (`id`, `status`,
+  no second mapper. A backend ignores client-only fields (`id`, `status`,
   `createdAt`, `attemptKey`) and translates `parts` to the active provider's
-  shape (§1, §7).
+  shape.
 - `wireVersion` is protocol-only and is excluded from the provider-effective
-  request/hash. Unsupported versions fail as HTTP `426` before idempotency
-  claim or provider call.
-- An `ImagePart` rides as `{"type": "image", "mimeType": "image/jpeg",
-  "data": "<base64>"}` — already resized by the Core.
+  request/hash. On the Firebase wire an unsupported version fails as HTTP
+  `426` before idempotency claim or provider call.
+- An `ImagePart` rides in its storage JSON shape `{"type": "image",
+  "mimeType": "image/jpeg", "data": "<base64>"}` — already resized by the
+  Core.
 
 **What the Core assembles** (`[system] + [prior Messages] + [new Message]`,
 CONTEXT.md §Context Assembly — filtering pinned here):
@@ -573,54 +570,23 @@ CONTEXT.md §Context Assembly — filtering pinned here):
   (`context-too-long`). Degenerate case (system + one Message already over
   budget) = immediate `Failed(context-too-long)`, never retried silently.
 
-### Response — pre-stream failures (HTTP status, no stream yet)
+### Response — protocol signals (transport-neutral semantics)
 
-Every successful SSE response includes
-`X-Chat-AI-Wire-Version: 1`. Pre-stream failures are `4xx/5xx` with body
-`{"cause": "<code>", "detail": "<raw, logs-only>"?}` —
-the cause catalogue per the **complete normalisation table,
-SERVER-CONTRACT.md §10** (e.g. `401 {"cause":"auth"}`,
-`403 {"cause":"entitlement"}`, `413 {"cause":"context-too-long"}`; request
-payload limit: **10 MB**).
+The full HTTP binding — pre-stream failure statuses/bodies, the wire-version
+header/`426`, and the exact SSE event frames — is pinned in the adapter's
+`WIRE-FORMATS.md`. The core-side semantics:
 
-Unsupported `wireVersion` is
-`426 {"cause":"upstream","detail":"unsupported-wire-version"}`. It creates
-no idempotency/usage record and never calls a provider.
-
-**Protocol signals** (not Failure causes — SERVER-CONTRACT.md §6/§10):
-
-- **`409 Conflict`** — same key, mismatched params. In a **silent retry**
-  this is a client bug (`Failed(upstream)`, assert in debug — the Attempt's
-  `ChatRequest` is frozen and byte-identical by construction); in an
-  **explicit** resend or interrupted-reply recovery → **one** automatic re-run
-  under a fresh key.
-- **`410 Gone`** — the attempt is recorded as aborted and refused while its
-  tombstone is retained. Silent retry → terminal `Failed(upstream)`; explicit
-  reused-key command → **one** automatic fresh-key re-run.
-- A **replay hit** (key `complete`) is an ordinary SSE response replaying the
+- **Conflict** (`ConflictEvent`; HTTP `409` on the Firebase wire) — same key,
+  mismatched params. In a **silent retry** this is a client bug
+  (`Failed(upstream)`, assert in debug — the Attempt's `ChatRequest` is
+  frozen and byte-identical by construction); in an **explicit** resend or
+  interrupted-reply recovery → **one** automatic re-run under a fresh key.
+- **Gone** (`GoneEvent`; HTTP `410`) — the attempt is recorded as aborted and
+  refused while its tombstone is retained. Silent retry → terminal
+  `Failed(upstream)`; explicit reused-key command → **one** automatic
+  fresh-key re-run.
+- A **replay hit** (key `complete`) is an ordinary response replaying the
   stored outcome — the whole text may arrive as one big `delta`, then `done`.
-
-### Response — the SSE stream (`200`, `text/event-stream`)
-
-```
-event: delta
-data: {"text": "<chunk>"}
-
-event: provider_state
-data: {"provider": "openai|anthropic", "data": "<base64>"}
-
-event: tool_call
-data: {"id": "<toolCallId>", "name": "<tool>",
-       "args": { … complete, validated … },
-       "usage": {"inputTokens": 123, "outputTokens": 45}?}
-
-event: done
-data: {"usage": {"inputTokens": 123, "outputTokens": 456, "usageRaw": {…}?}}
-
-event: error
-data: {"cause": "<code>", "detail": "…"?, "usage": {…}?, "retryAfterMs": 1200?}
-```
-
 - **Each leg's response ends with exactly one terminal event** — `tool_call`
   (this leg is over, carries the leg's usage; the tool-result comes back as a
   new request), `done` (final leg; the reply is complete) or `error`. After
@@ -629,13 +595,9 @@ data: {"cause": "<code>", "detail": "…"?, "usage": {…}?, "retryAfterMs": 120
 - `provider_state` is nonterminal and ordered with the visible deltas/tool
   parts. The Core appends the decoded opaque bytes to the assistant Message;
   it never emits them on `tokens` and widgets never render or build them.
-- A stream ending without a terminal event = `Failed(upstream)` (§2 of the
-  contract).
-- `Retry-After`: pre-stream HTTP failures use the standard header; in-stream
+- A stream ending without a terminal event = `Failed(upstream)`.
+- `Retry-After`: pre-stream failures use the standard header; in-stream
   `error` uses `retryAfterMs` — both land in `ErrorEvent.retryAfter` (§8).
-- Reserved for v2 resumable (§8 of the contract), **not emitted by the v1
-  template, ignored by the v1 client**: `streamId` on the response,
-  monotonic `eventId` on `delta`.
 
 ### Tool-result round-trip
 
@@ -646,11 +608,9 @@ with `toolCall + toolResult` (`toolCallId`, `content`, `isError`) — under a
 `attemptKey` is updated to the new leg's key.
 
 The client wire keeps the internal ToolResult intact (`content` + `isError`);
-mapping it to a provider is a **server-only** step (SERVER-CONTRACT §7): OpenAI
-Responses has no native `is_error`, so the proxy encodes the pair as a compact
-JSON string `{"content":<string>,"isError":<bool>}` in `function_call_output.output`,
-while a future Anthropic adapter must map the unchanged client shape to its
-native result form. This does not change the client wire.
+mapping it to a provider is a **backend-only** step — the Firebase proxy's
+exact encoding is pinned in the adapter's SERVER-CONTRACT §7. It never
+changes the client shape.
 
 ## 7. Widgets — concrete configuration
 
@@ -832,14 +792,15 @@ empty-reply regenerate `Icons.refresh` · failure `Icons.error_outline` ·
 interrupted `Icons.stop_circle_outlined` · default avatar `Icons.person`.
 No tooltips and no other built-in user-facing strings.
 
-## 8. AI Backend interface + Firebase adapter
+## 8. AI Backend interface
 
 ```dart
 abstract class ChatBackend {
   Stream<BackendEvent> send(ChatRequest request);
   // cancelling the subscription = wire-cancel: the transport MUST close the
-  // connection; the proxy's upstream abort is BEST-EFFORT (observed
-  // disconnect / write failure) and the orphan is bounded — contract §3
+  // connection; any upstream abort is BEST-EFFORT (observed
+  // disconnect / write failure) and the orphan is bounded — the adapter's
+  // contract
 }
 
 ChatRequest { int wireVersion = 1; String botId; String system;
@@ -881,18 +842,12 @@ sealed BackendEvent =
 **The backend stream never throws.** Every outcome — transport failure
 included — is one of the events above ("failures are data" extends to the
 transport layer); a thrown error escaping `send()` is a bug by contract.
-`FirebaseChatBackend` verifies HTTP
-`X-Chat-AI-Wire-Version: 1` before yielding `Accepted`; missing/mismatched
-version becomes `ErrorEvent(upstream, "unsupported-wire-version", …)`.
 
-**SSE parser contract:** incremental UTF-8 decoding precedes line parsing; LF
-and CRLF are accepted; comment/keepalive lines are ignored; consecutive `data:`
-lines are joined with `\n` per SSE; more than one event may arrive in a transport
-chunk. Malformed JSON/unknown event before terminal and EOF without terminal
-produce exactly one `ErrorEvent(upstream, <logs-only detail>)`. The first
-terminal closes the logical stream; duplicate terminals or later events are
-ignored and reported to debug diagnostics, never emitted as a second outcome.
-Parser defects never escape as stream errors.
+Production transports implement this interface in the companion adapters:
+`FirebaseChatBackend` (`chat_ai_firebase` — dio + Firebase tokens + the SSE
+pipeline; its wire-version check, SSE parser contract and HTTP binding moved
+unchanged to the adapter's docs) and `OpenAIRealtimeChatBackend`
+(`chat_ai_openai_realtime` — direct WebRTC).
 
 **Deadline mechanics in the Core** (realizes CONTEXT.md §Retry Boundary): the
 Core records `startedAt` at the command and checks elapsed time only at
@@ -903,9 +858,6 @@ within the deadline the same-key retry runs again (the proxy released the key
 on an exact safe-release rejection, §6 contract), past it → `Failed` with the
 last real cause.
 
-`FirebaseChatBackend(url)` implements it with `dio` (`ResponseType.stream` +
-`CancelToken`), pulls the id-token from `firebase_auth` and the attestation
-from `firebase_app_check` per request, parses SSE with the internal parser.
 The retry loop (silent side of the Retry Boundary) lives in the **Core**, not
 the backend — the Fake then exercises it too. **The Core freezes the
 serialized `ChatRequest` for the lifetime of an Attempt** — every silent
@@ -923,40 +875,21 @@ that leg.
 
 ## 9. Server template
 
-Spec: docs/server-template.md (Firebase CF gen2 + Firestore). Implementation
-scope for v1 is **OpenAI Responses only**. The normalised client/server boundary
-remains provider-agnostic, but no second provider is promised by v1.
-**Anthropic is product backlog**: its adapter, SDK, translator fixtures,
-error/safe-release mapping and deployment support are future work. Existing
-`anthropic` persisted/wire discriminator values remain reserved so this scope
-decision does not require a breaking data or wire migration.
+The reusable Firebase Functions gen2 server template ships with the Firebase
+adapter package — **`packages/chat_ai_firebase/`**: the template itself at
+`server/firebase-chat-template/`, its normative ownership/composition and
+deployment invariants in the adapter's `docs/server-template.md`, and the
+wire/idempotency contract in the adapter's `docs/SERVER-CONTRACT.md`. The
+template is copied and deployed into each consuming app's own Firebase
+project (own key, own billing, ADR 0001).
 
-The template lives at **`server/firebase-chat-template/`** — a **reusable**
-Firebase Functions gen2 TypeScript template for the BFF, copied and deployed into
-each consuming app's own Firebase project once that app adds its composition root,
-secrets and project (own key, own billing, ADR 0001). It is **not** a
-self-contained deployable project on its own (see the template README for the
-current increment's status). It carries its **own `package.json` /
-`package-lock.json`** (the lockfile **is** tracked — deployed as an app, not
-published as a library); `.firebaserc`, the project id, provider secrets,
-service-account / admin keys and the app's business rules are **never** shipped
-with it (per-deployment only).
-
-The ownership/composition boundary is normative in `docs/server-template.md`
-(«Ownership and composition boundary»): the template owns the mandatory runtime
-orchestration (validation, idempotency/replay pipeline, admission order,
-settlement) behind an internal `createChatHandler(dependencies)` factory, while
-each consuming app supplies the four required hooks and its own app-owned
-`src/index.ts` composition root (Firebase project, secrets, tiers, deploy
-settings). App settings choose values but cannot disable the mandatory
-safety/idempotency/accounting gates.
-
-The internal dependencies also require app-owned `functionTimeoutSeconds` and
-`replayTtlSeconds`, with no package defaults. The former is the exact positive
-integer used by both the handler owner window and Firebase Functions gen2
-`onRequest.timeoutSeconds`; the latter is a positive integer of at least the
-30-second client retry window (`600` seconds recommended for v1). Deploy
-validation rejects missing, invalid or mismatched values.
+Implementation scope for v1 is **OpenAI Responses only**. The normalised
+client/server boundary remains provider-agnostic, but no second provider is
+promised by v1. **Anthropic is product backlog**: its adapter, SDK,
+translator fixtures, error/safe-release mapping and deployment support are
+future work. Existing `anthropic` persisted/wire discriminator values remain
+reserved so this scope decision does not require a breaking data or wire
+migration.
 
 ## 10. Fake backend (v1, `package:chat_ai/testing.dart`)
 
@@ -995,7 +928,10 @@ FakeChatBackend()
 
 ## 12. Test contract (must pass before v1 "done")
 
-Against `FakeChatBackend` unless noted:
+Items 1–14 are the core's own test contract, against `FakeChatBackend`
+unless noted. Items 15–18 belong to the **`chat_ai_firebase` companion
+package** (its transport, SSE layers, server template and platform smoke)
+and run in that package; the numbering is kept for continuity:
 
 1. **State machine and private gate**: every legal transition; one reply in
    flight; two sends racing during async resize produce one preprocessing job,
@@ -1079,15 +1015,16 @@ Against `FakeChatBackend` unless noted:
     included, empty complete replies omitted from provider wire, image-only
     sends; BotProfile prompt precedes chronological persisted system Messages,
     which are removed from ordinary provider history.
-15. **Wire/version and backend failures-as-data**: request/header version 1;
+15. **Wire/version and backend failures-as-data** (`chat_ai_firebase`):
+    request/header version 1;
     missing/mismatch and server 426 become upstream data; no backend stream
     error escapes. `wireVersion` and client-only Message fields do not affect
     `paramsHash`.
-16. **SSE parser**: UTF-8 scalar split across chunks; LF/CRLF; comments and
+16. **SSE parser** (`chat_ai_firebase`): UTF-8 scalar split across chunks; LF/CRLF; comments and
     `: ping`; multiple `data:` lines; multiple events/chunk; JSON split across
     chunks; malformed JSON; unknown event; duplicate terminal; event after
     terminal; EOF without terminal; ordered `provider_state` replay.
-17. **Server contract/integration** (real template, not Fake):
+17. **Server contract/integration** (`chat_ai_firebase`; real template, not Fake):
     - pinned OpenAI Responses fixtures translate text, images, system
       instructions, tools/results, opaque state, usage, stop reasons and exact
       provider error structures into byte-exact normalised SSE;
@@ -1126,7 +1063,7 @@ Against `FakeChatBackend` unless noted:
       retries and a forced 5xx/timeout fixture produces exactly one
       provider request; every tier's worst-case normalized SSE passes the 10 MB
       Functions streaming-response deploy gate.
-18. **Cancel/platform smoke**: observed disconnect/write failure invokes the
+18. **Cancel/platform smoke** (`chat_ai_firebase`): observed disconnect/write failure invokes the
     best-effort upstream abort; keepalive is emitted; orphan bounded by function
     timeout/`maxOutputTokens`; terminal accounting remains idempotent. A real
     device → deployed gen2 smoke records platform behaviour but does not gate the
@@ -1135,7 +1072,11 @@ Against `FakeChatBackend` unless noted:
 ## References
 
 - CONTEXT.md — the domain glossary this spec realizes
-- SERVER-CONTRACT.md — wire rules (this spec pins the exact shapes, §6)
-- docs/adr/0001–0006 — the decisions
-- docs/widgets-spec.md, docs/server-template.md — surface specs
+- docs/TOOL-SCHEMA-V1.md — the canonical Tool Schema v1 dialect
+- docs/adr/0002–0005 — the core decisions
+- docs/widgets-spec.md — the widget surface spec
+- `packages/chat_ai_firebase/docs/` — the Firebase adapter's SERVER-CONTRACT
+  (wire/idempotency rules), WIRE-FORMATS (the exact HTTP/SSE bytes),
+  server-template guide and ADRs 0001/0006
+- `packages/chat_ai_openai_realtime/` — the OpenAI Realtime adapter
 - Sibling: `record_transcribe/V1_SPEC.md` — the structural template

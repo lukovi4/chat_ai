@@ -3,10 +3,8 @@ import 'dart:convert';
 import 'dart:io' show HttpDate;
 
 // The core contracts (ChatBackend, ChatRequest, BackendEvent, FailureCause)
-// come exclusively through the public barrel; `hide` resolves the temporary
-// collision with the core's own FirebaseChatBackend export, which the core
-// cleanup increment removes.
-import 'package:chat_ai/chat_ai.dart' hide FirebaseChatBackend;
+// come exclusively through the public barrel.
+import 'package:chat_ai/chat_ai.dart';
 import 'package:dio/dio.dart';
 import 'package:firebase_app_check/firebase_app_check.dart'
     show FirebaseAppCheck;

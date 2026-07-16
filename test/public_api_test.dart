@@ -128,14 +128,6 @@ void main() {
       BackendEvent.providerState(ProviderOpaquePart('openai', Uint8List(0))),
       isA<ProviderStateEvent>(),
     );
-    // The production transport is public and assignable to the interface.
-    // Constructing it touches no Firebase/network — tokens are pulled per
-    // send, which this test never calls — and the URL constructor is the
-    // whole public configuration surface (V1_SPEC §8).
-    final ChatBackend backend = FirebaseChatBackend(
-      'https://example.invalid/chat',
-    );
-    expect(backend, isA<FirebaseChatBackend>());
   });
 
   test('the chat widgets, ChatTheme and the §3/§7 widget contracts are '
@@ -276,9 +268,9 @@ void main() {
     // Internal helpers stay internal.
     expect(barrel.contains('conversation_invariants'), isFalse);
     expect(barrel.contains('utc_date_time_converter'), isFalse);
-    // The transport file is exported selectively: the class only — the
-    // internal test seam never reaches the public surface.
-    expect(barrel.contains('show FirebaseChatBackend'), isTrue);
+    // Production transports moved to the companion adapter packages: the
+    // core barrel no longer exports FirebaseChatBackend (or any transport).
+    expect(barrel.contains('firebase_chat_backend'), isFalse);
     expect(barrel.contains('firebaseChatBackendForTesting'), isFalse);
 
     // The Core façade is exported selectively too: the session + checkpoint

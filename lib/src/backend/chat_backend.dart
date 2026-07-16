@@ -10,17 +10,17 @@ import 'chat_request.dart';
 /// (so the fake exercises it too), not here.
 ///
 /// Cancelling the subscription = wire-cancel: the transport MUST close the
-/// connection; the proxy's upstream abort is BEST-EFFORT (observed
-/// disconnect / write failure) and the orphan is bounded (SERVER-CONTRACT §3).
+/// connection; any upstream abort is BEST-EFFORT (observed disconnect /
+/// write failure) and the orphan is bounded.
 ///
 /// The returned stream **never throws**: every outcome, transport failure
 /// included, is a [BackendEvent] — see the event contract on [BackendEvent].
 ///
 /// Implementations:
-/// - `FirebaseChatBackend` (production: dio + Firebase tokens + the internal
-///   SSE pipeline) — `firebase_chat_backend.dart`;
-/// - `FakeChatBackend` (tests, `package:chat_ai/testing.dart`) — a later
-///   increment.
+/// - production transports live in the companion adapter packages of this
+///   repository — `FirebaseChatBackend` (`chat_ai_firebase`) and
+///   `OpenAIRealtimeChatBackend` (`chat_ai_openai_realtime`);
+/// - `FakeChatBackend` (tests, `package:chat_ai/testing.dart`).
 abstract interface class ChatBackend {
   /// Perform one backend request and stream its events.
   Stream<BackendEvent> send(ChatRequest request);

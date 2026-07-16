@@ -1,6 +1,6 @@
 /// Internal validator of the closed **Chat AI Tool Schema v1** dialect
-/// (SERVER-CONTRACT §7) — declarations and argument instances. Not exported
-/// from `package:chat_ai/chat_ai.dart`.
+/// (docs/TOOL-SCHEMA-V1.md) — declarations and argument instances. Not
+/// exported from `package:chat_ai/chat_ai.dart`.
 ///
 /// Deliberately NOT a general JSON Schema implementation: only the exact v1
 /// dialect is accepted; everything else — `$ref`, `oneOf`, `pattern`,
@@ -16,10 +16,10 @@ library;
 
 import '../models/tool.dart';
 
-/// `^[A-Za-z0-9_-]{1,64}$` (SERVER-CONTRACT §7).
+/// `^[A-Za-z0-9_-]{1,64}$` (docs/TOOL-SCHEMA-V1.md).
 final RegExp _toolNamePattern = RegExp(r'^[A-Za-z0-9_-]{1,64}$');
 
-/// The only keywords a v1 schema object may carry (SERVER-CONTRACT §7).
+/// The only keywords a v1 schema object may carry (docs/TOOL-SCHEMA-V1.md).
 const Set<String> _allowedKeywords = {
   'type',
   'description',
@@ -80,7 +80,7 @@ bool toolArgsMatchSchema(Map<String, dynamic> schema, Object? args) =>
 
 /// Returns a human-readable violation (logs-only wording) or null when the
 /// [schema] node is a valid v1 schema object. [isRoot] additionally pins
-/// `type: object` at the root (SERVER-CONTRACT §7).
+/// `type: object` at the root (docs/TOOL-SCHEMA-V1.md).
 String? _schemaViolation(
   Object? schema, {
   required String path,
@@ -127,7 +127,7 @@ String? _schemaViolation(
   final bool isArray = nonNullType == 'array';
 
   // Keyword applicability: object keywords only on objects, items only on
-  // arrays, enum only on scalars (SERVER-CONTRACT §7).
+  // arrays, enum only on scalars (docs/TOOL-SCHEMA-V1.md).
   if (!isObject &&
       (schema.containsKey('properties') ||
           schema.containsKey('required') ||
@@ -206,7 +206,7 @@ String? _schemaViolation(
             'declared type "$nonNullType"';
       }
     }
-    // A nullable enum must include null (SERVER-CONTRACT §7).
+    // A nullable enum must include null (docs/TOOL-SCHEMA-V1.md).
     if (nullable && !enumValues.contains(null)) {
       return '$path: a nullable enum must include null';
     }

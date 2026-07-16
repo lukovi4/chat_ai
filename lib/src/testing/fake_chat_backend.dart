@@ -18,7 +18,8 @@ import '../models/usage.dart';
 /// mode toggle: with it on, a repeated [send] under an Idempotency-Key whose
 /// response already ended in `done`/`tool_call` replays the recorded outcome
 /// instead of consuming the script — the recover-before-rebill path
-/// (SERVER-CONTRACT §6). A key that ended in `error` stays unknown (the §6
+/// (the chat_ai_firebase SERVER-CONTRACT §6). A key that ended in `error`
+/// stays unknown (the §6
 /// release/expiry side), so its repeat consumes the next scripted response.
 ///
 /// Event order is normative (V1_SPEC §8): `Accepted` first (pre-stream

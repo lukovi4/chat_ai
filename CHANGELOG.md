@@ -1,5 +1,29 @@
 # Changelog
 
+## Unreleased
+
+Package split: `chat_ai` is now an independent, transport-free core with two
+companion adapter packages living in this same repository.
+
+- **BREAKING (package surface):** `FirebaseChatBackend` is no longer exported
+  from `package:chat_ai/chat_ai.dart`. The Firebase adapter — the transport,
+  the SSE layers, the server template, the smoke example and the Firebase
+  docs — moved to `packages/chat_ai_firebase`. A Firebase app adds the
+  `chat_ai_firebase` package dependency (same repository,
+  `path: packages/chat_ai_firebase`) and one import
+  (`package:chat_ai_firebase/chat_ai_firebase.dart`); the
+  `FirebaseChatBackend(url)` configuration, the wire format and the runtime
+  behaviour are unchanged. No conversation/data migration is needed.
+- The OpenAI Realtime adapter lives at `packages/chat_ai_openai_realtime`
+  (`OpenAIRealtimeChatBackend`).
+- The core dropped its `dio`, `firebase_auth` and `firebase_app_check`
+  dependencies; it now carries no transport dependency at all.
+- Core contracts and behaviour are unchanged: `ChatSession`, `ChatBackend`,
+  `ChatRequest`, `BackendEvent`, the models/JSON, the state machine, the
+  widgets and `FakeChatBackend` are untouched.
+- The canonical Tool Schema v1 rules now live in `docs/TOOL-SCHEMA-V1.md`;
+  the fixture corpus stays at `test/contract_fixtures/tool_schema_v1`.
+
 ## 1.0.0 - 2026-07-15
 
 First v1 release of the `chat_ai` chat-with-AI kit — a private git dependency,

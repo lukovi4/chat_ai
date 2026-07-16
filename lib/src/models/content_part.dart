@@ -29,8 +29,8 @@ sealed class ContentPart with _$ContentPart {
   const factory ContentPart.image(Uint8List bytes) = ImagePart;
 
   /// The bot's request to run an app Tool; [toolCallId] is the provider's call
-  /// id normalized by the proxy (SERVER-CONTRACT §7) and pairs this part with
-  /// its [ToolResultPart].
+  /// id normalized by the backend (the chat_ai_firebase SERVER-CONTRACT §7)
+  /// and pairs this part with its [ToolResultPart].
   const factory ContentPart.toolCall(
     String toolCallId,
     String name,

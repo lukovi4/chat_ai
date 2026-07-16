@@ -9,7 +9,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 
-import 'package:chat_ai/chat_ai.dart' hide FirebaseChatBackend;
+import 'package:chat_ai/chat_ai.dart';
 import 'package:chat_ai_firebase/src/backend/chat_request_wire.dart';
 import 'package:chat_ai_firebase/src/backend/firebase_chat_backend.dart';
 import 'package:dio/dio.dart';

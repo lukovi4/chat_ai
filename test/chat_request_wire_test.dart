@@ -1,7 +1,10 @@
-// The internal wire-encoder ChatRequest → JSON request body (V1_SPEC §6
-// "Request (client → proxy)"; SERVER-CONTRACT §5): exact top-level form,
-// messages via the storage JSON of Message, tools omitted when empty,
-// idempotencyKey never in the body, byte-identical repeat encoding.
+// The internal canonical serializer ChatRequest → JSON body form (V1_SPEC
+// §6) — in the core it backs the ChatSession payload-size probe: exact
+// top-level form, messages via the storage JSON of Message, tools omitted
+// when empty, idempotencyKey never in the body, byte-identical repeat
+// encoding. The frozen contract is deliberately IDENTICAL to the adapter's
+// copy (packages/chat_ai_firebase/test/chat_request_wire_test.dart) — the
+// two serializer copies must never drift apart.
 // Imports the internal file directly — encodeChatRequestBody is NOT exported
 // from package:chat_ai/chat_ai.dart.
 import 'dart:convert';

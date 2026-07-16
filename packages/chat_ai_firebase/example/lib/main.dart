@@ -1,10 +1,7 @@
 import 'dart:async';
 import 'dart:typed_data';
 
-// `hide` resolves the temporary collision: the core barrel still exports its
-// own FirebaseChatBackend until the core cleanup increment removes it — the
-// production transport of this harness is the adapter's.
-import 'package:chat_ai/chat_ai.dart' hide FirebaseChatBackend;
+import 'package:chat_ai/chat_ai.dart';
 import 'package:chat_ai_firebase/chat_ai_firebase.dart';
 import 'package:firebase_app_check/firebase_app_check.dart';
 import 'package:firebase_auth/firebase_auth.dart';

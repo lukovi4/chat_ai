@@ -1,12 +1,10 @@
 // Public-API compile test of the adapter: it imports ONLY public entry
 // points — no `src/` imports — and pins the export boundary of the barrel:
 // exactly `FirebaseChatBackend`, never the internal test seam, and no
-// re-export of `chat_ai`. The core barrel is imported with the temporary
-// `hide` because it still exports its own `FirebaseChatBackend` until the
-// core cleanup increment removes it.
+// re-export of `chat_ai`.
 import 'dart:io';
 
-import 'package:chat_ai/chat_ai.dart' hide FirebaseChatBackend;
+import 'package:chat_ai/chat_ai.dart';
 import 'package:chat_ai_firebase/chat_ai_firebase.dart';
 import 'package:flutter_test/flutter_test.dart';
 

@@ -25,7 +25,9 @@ sibling kit.
 > **behavioural semantics** — what it means and how it behaves — plus
 > explicitly-labelled **defaults** the app can tune. No implementation detail
 > (types, methods, wire shapes): that is spec/ТЗ level. Decisions with real
-> trade-offs go in `docs/adr/`; wire behaviour lives in `SERVER-CONTRACT.md`.
+> trade-offs go in `docs/adr/`; wire behaviour lives in `SERVER-CONTRACT.md`
+> (shipped with the Firebase adapter: `packages/chat_ai_firebase/docs/` —
+> every `SERVER-CONTRACT.md` reference below points there).
 
 ## Glossary
 

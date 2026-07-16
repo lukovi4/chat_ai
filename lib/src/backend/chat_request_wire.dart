@@ -2,17 +2,18 @@ import 'dart:convert';
 
 import 'chat_request.dart';
 
-/// Internal wire-encoder of one [ChatRequest] into the exact JSON body of
-/// the POST request (V1_SPEC §6 "Request (client → proxy)";
-/// SERVER-CONTRACT §5). Not exported from `package:chat_ai/chat_ai.dart`.
+/// Internal canonical serializer of one [ChatRequest] into its exact JSON
+/// body form (V1_SPEC §6). In the core it exists for exactly one caller: the
+/// `ChatSession` payload-size probe, which measures the byte length of the
+/// would-be request against the pre-backend 10 MB gate (V1_SPEC §11/§12).
+/// It is NOT a transport implementation and is not exported from
+/// `package:chat_ai/chat_ai.dart`. The Firebase adapter (`chat_ai_firebase`)
+/// carries its own package-local copy of this function for the actual wire
+/// request; both copies are pinned by identical frozen contract tests.
 ///
-/// Returns a compact JSON **string**, not a map: the Core freezes the
-/// serialized request for the lifetime of an Attempt and every silent retry
-/// re-sends it byte-identical (V1_SPEC §8) — the future Core stores this
-/// function's result once. Two calls over the same unchanged request yield
-/// the identical string; no canonicalizer and no key sorting are involved
-/// (the server does its own canonical provider-effective normalisation,
-/// SERVER-CONTRACT §6).
+/// Returns a compact JSON **string**, not a map. Two calls over the same
+/// unchanged request yield the identical string; no canonicalizer and no
+/// key sorting are involved.
 ///
 /// The exact body shape:
 /// - `wireVersion`, `botId`, `system` and `messages` are always present;
@@ -23,7 +24,7 @@ import 'chat_request.dart';
 ///   otherwise each Tool encodes exactly as `{name, description,
 ///   parameters}`, with the `parameters` JSON Schema passed through as-is —
 ///   unknown fields included, no schema validation here;
-/// - `idempotencyKey` is NEVER in the body: the future HTTP layer sends it
+/// - `idempotencyKey` is NEVER in the body: the adapter's HTTP layer sends it
 ///   only as the `Idempotency-Key` header (ADR 0004).
 ///
 /// Out of scope by contract: history filtering / context assembly (the Core

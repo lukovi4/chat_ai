@@ -32,8 +32,10 @@ tool drops in without changing the Package.
   Conversation State gains `AwaitingTool`.
 - Tool declarations use the portable **Chat AI Tool Schema v1** dialect; the proxy translates to
   each provider and **assembles/validates streamed argument JSON server-side**,
-  emitting a complete `tool_call` event (SERVER-CONTRACT.md §7). The Core never
-  parses partial tool JSON.
+  emitting a complete `tool_call` event (SERVER-CONTRACT.md §7 — shipped with
+  the Firebase adapter, `packages/chat_ai_firebase/docs/`; the portable
+  dialect itself is pinned in the core `docs/TOOL-SCHEMA-V1.md`). The Core
+  never parses partial tool JSON.
 - An interrupted tool-call applies nothing and surfaces `upstream` (Retry Boundary).
 - The tool-result round-trip reuses the Idempotency-Key discipline — with its
   own fresh key per leg (ADR 0004 / SERVER-CONTRACT.md §6–§7).

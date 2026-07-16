@@ -4,23 +4,24 @@
 ///
 /// The public surface: the `ChatSession` Core façade (V1_SPEC §3/§4), the
 /// persisted value models + their exact JSON contract (V1_SPEC §5), the
-/// ephemeral state and configuration values, the backend/event contracts and
-/// the production `FirebaseChatBackend` transport (V1_SPEC §8), and the three
+/// ephemeral state and configuration values, the backend/event contracts
+/// (V1_SPEC §8), and the three
 /// chat widgets — `ChatMessageList`, `MessageBubble`, `ChatInputBar` — with
 /// `ChatTheme` and the widget enums/builder typedefs (V1_SPEC §3/§7).
-/// Internal validators, json helpers, the wire encoder, the SSE layers, the
-/// tool-schema validator, the Core test seams, the widget theme
-/// resolver/validation helpers and the command-disposition bridge are not
-/// exported; the fake backend lives in `package:chat_ai/testing.dart` only.
+/// Internal validators, json helpers, the wire encoder (the probe-only
+/// canonical serializer), the tool-schema validator, the Core test seams,
+/// the widget theme resolver/validation helpers and the command-disposition
+/// bridge are not exported; the fake backend lives in
+/// `package:chat_ai/testing.dart` only.
+/// Production transports live in the companion adapter packages of this
+/// repository — `chat_ai_firebase` and `chat_ai_openai_realtime` — and are
+/// never exported from the core.
 library;
 
 // Backend boundary (V1_SPEC §8): the abstraction, its request and its events.
 export 'src/backend/backend_event.dart';
 export 'src/backend/chat_backend.dart';
 export 'src/backend/chat_request.dart';
-// Production transport (V1_SPEC §8): the class only — the internal test seam
-// and the SSE/wire internals stay unexported.
-export 'src/backend/firebase_chat_backend.dart' show FirebaseChatBackend;
 // The Core façade (V1_SPEC §3): the session and the checkpoint contract only —
 // the command-disposition bridge, the widgets' imageOptions bridge and the
 // internal test seam stay unexported.
