@@ -238,7 +238,7 @@ void main() {
 
   test('failure before the commit boundary → network (test 14)', () async {
     final run = start(
-      transport: FakeTransport(connectError: StateError('ice failed')),
+      transport: FakeTransport(connectError: StateError('handshake failed')),
     );
     await pumpEventQueue();
     expect(run.collector.events, hasLength(1));
@@ -249,10 +249,10 @@ void main() {
     expect(run.collector.done, isTrue);
   });
 
-  test('failure during/after the RTCDataChannel send → upstream, and never '
+  test('failure during/after the WebSocket send → upstream, and never '
       'a second response.create (tests 15, 17)', () async {
     final transport = FakeTransport();
-    transport.connection.sendError = StateError('channel broke mid-send');
+    transport.connection.sendError = StateError('socket broke mid-send');
     final run = start(transport: transport);
     await pumpEventQueue();
     final error = run.collector.events.single as ErrorEvent;

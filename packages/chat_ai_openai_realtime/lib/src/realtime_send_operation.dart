@@ -1,4 +1,4 @@
-// One `ChatBackend.send()` leg over one OpenAI Realtime WebRTC session.
+// One `ChatBackend.send()` leg over one OpenAI Realtime WebSocket session.
 //
 // The stream contract of the base package holds here: the returned stream is
 // cold, single-subscription, NEVER throws, ends with exactly one terminal
@@ -15,8 +15,8 @@
 // `FailureCause.upstream` (never `network|rate|overloaded`, never
 // Conflict/Gone), so the Core can never re-run a possibly-billed call.
 //
-// No raw OpenAI error message, SDP, secret, prompt or stack trace ever
-// reaches an event `detail` — details are stable machine markers only.
+// No raw OpenAI error message, secret, prompt or stack trace ever reaches an
+// event `detail` — details are stable machine markers only.
 
 import 'dart:async';
 import 'dart:convert';
@@ -28,7 +28,7 @@ import 'realtime_request_translator.dart';
 import 'realtime_transport.dart';
 
 /// Runs one backend leg. Package-internal seam: the public backend passes
-/// the production WebRTC transport; tests pass a fake.
+/// the production WebSocket transport; tests pass a fake.
 Stream<BackendEvent> runRealtimeSend({
   required ClientSecretProvider clientSecretProvider,
   required RealtimeTransport transport,
@@ -122,8 +122,8 @@ class _RealtimeSendOperation {
       return;
     }
 
-    // 2–7. One fresh WebRTC session: peer connection, `oai-events` data
-    // channel, official SDP signaling, channel open. All of it is before the
+    // 2. One fresh Realtime WebSocket session (handshake authorized by the
+    // ephemeral secret). All of it is before the
     // commit boundary — a failure is `network` and safe to silently retry.
     // The cancellation signal is handed INTO the transport so a wire-cancel
     // actively aborts the pending setup and releases its partial resources;
@@ -281,8 +281,8 @@ class _RealtimeSendOperation {
   }
 
   /// `Accepted` means exactly one thing: the server event `response.created`
-  /// arrived. It is never emitted for the secret, the peer connection, the
-  /// SDP exchange, the channel opening or the local dispatch.
+  /// arrived. It is never emitted for the secret, the WebSocket handshake or
+  /// the local dispatch.
   void _handleResponseCreated(Map<String, dynamic> event) {
     final Object? response = event['response'];
     if (response is Map<String, dynamic>) {

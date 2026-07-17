@@ -12,7 +12,7 @@ at compile time by the `SMOKE_BACKEND` define:
 | `SMOKE_BACKEND` | Transport under test | Wire |
 |---|---|---|
 | `firebase` | `FirebaseChatBackend` (`chat_ai_firebase`) | deployed proxy endpoint (HTTP + SSE) |
-| `realtime` | `OpenAIRealtimeChatBackend` (`chat_ai_openai_realtime`) | direct WebRTC to OpenAI with app-minted ephemeral client secrets |
+| `realtime` | `OpenAIRealtimeChatBackend` (`chat_ai_openai_realtime`) | direct OpenAI Realtime WebSocket with app-minted ephemeral client secrets |
 
 One launch tests exactly one backend: there is **no runtime switching** inside
 a live session and **no default mode** — a missing or unknown `SMOKE_BACKEND`
@@ -177,7 +177,8 @@ separately for `firebase` and `realtime`:
    and `{"botId": …}`; its logs contain no prompt/messages/images/tools,
    no Firebase token and no client secret.
 9. **Direct path** — user content flows from the phone straight to OpenAI
-   over WebRTC (the app backend sees none of it).
+   over the Realtime WebSocket (the app backend sees none of it). No
+   microphone permission prompt appears (the transport uses no audio).
 10. **Single dispatch** — one send leg emits exactly one `response.create`.
     Note: the physical smoke is NOT the proof of the ambiguous-failure
     money-safe boundary — that guarantee stays pinned by the Realtime

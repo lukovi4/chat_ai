@@ -1,10 +1,10 @@
 name: chat_ai_openai_realtime
 description: >-
-  OpenAI Realtime (WebRTC) ChatBackend for chat_ai: one WebRTC session per
-  send() leg, ephemeral client secrets minted by the app, stateless
-  out-of-band responses, text output. iOS/Android only.
-  Private git dependency, not published.
-version: 0.1.0
+  OpenAI Realtime (WebSocket) ChatBackend for chat_ai: one direct
+  wss://api.openai.com/v1/realtime session per send() leg, ephemeral client
+  secrets minted by the app, stateless out-of-band responses, text output.
+  No WebRTC, no microphone/camera. Private git dependency, not published.
+version: 0.2.0
 publish_to: none
 
 environment:
@@ -21,9 +21,9 @@ dependencies:
   chat_ai:
     path: ../..
 
-  # WebRTC peer connection + `oai-events` data channel on iOS/Android.
-  # SDP signaling uses dart:io — no extra HTTP dependency.
-  flutter_webrtc: ^1.5.2
+  # The Realtime transport is a plain WebSocket over `dart:io`
+  # (WebSocket.connect with the ephemeral secret as the Bearer header). No
+  # third-party transport dependency — dart:io fully covers iOS/Android.
 
 dev_dependencies:
   flutter_test:

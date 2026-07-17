@@ -27,22 +27,21 @@ class RealtimeConnectCancelled implements Exception {
   const RealtimeConnectCancelled();
 }
 
-/// Package-internal transport seam: establishes one OpenAI Realtime WebRTC
-/// session (peer connection + `oai-events` data channel + SDP signaling)
-/// per `send()` leg. Production uses `WebRtcRealtimeTransport`; tests use a
-/// fake. Never exported — not public API.
+/// Package-internal transport seam: establishes one OpenAI Realtime session
+/// per `send()` leg. Production uses `WebSocketRealtimeTransport` (a direct
+/// `wss://api.openai.com/v1/realtime` connection); tests use a fake. Never
+/// exported — not public API.
 abstract interface class RealtimeTransport {
-  /// Establishes one connection: a new peer connection, the `oai-events`
-  /// data channel, the official SDP exchange authorized by [clientSecret]
-  /// as the Bearer credential, and waits for the channel to open.
+  /// Establishes one connection authorized by [clientSecret] as the Bearer
+  /// credential. The returned connection is live and ready (for a WebSocket
+  /// that is the moment the handshake completes).
   ///
   /// A throw here is a pre-dispatch transport failure (`network` by the
   /// money-safe commit boundary). When [cancellation] fires, the transport
   /// must actively abort the pending setup, release every partial resource
-  /// it created (HTTP client/pending signaling request, data channel, peer
-  /// connection, listeners) and fail — [RealtimeConnectCancelled] by
-  /// convention; the caller ignores the outcome of a cancelled connect
-  /// either way.
+  /// it created (HTTP client / pending handshake, socket, listeners) and
+  /// fail — [RealtimeConnectCancelled] by convention; the caller ignores the
+  /// outcome of a cancelled connect either way.
   Future<RealtimeConnection> connect(
     String clientSecret,
     RealtimeCancellation cancellation,
@@ -51,16 +50,17 @@ abstract interface class RealtimeTransport {
 
 /// One live Realtime session owned by a single send operation.
 abstract interface class RealtimeConnection {
-  /// Server events from the `oai-events` data channel, one JSON string per
-  /// event. Closes (or errors) when the data channel or peer connection
-  /// dies; single-subscription.
+  /// Server events, one JSON string per event. Closes (or errors) when the
+  /// connection dies; single-subscription. A non-text (binary) frame is a
+  /// controlled protocol failure surfaced as a stream error, never its
+  /// bytes.
   Stream<String> get events;
 
-  /// Sends one serialized client event over the data channel. May throw —
+  /// Sends one serialized client event as a single text message. May throw —
   /// the caller maps the failure by the commit boundary.
   Future<void> send(String message);
 
-  /// Tears down the data channel and peer connection. Idempotent; never
-  /// throws meaningfully (callers swallow teardown errors regardless).
+  /// Tears down the connection. Idempotent; never throws meaningfully
+  /// (callers swallow teardown errors regardless).
   Future<void> close();
 }

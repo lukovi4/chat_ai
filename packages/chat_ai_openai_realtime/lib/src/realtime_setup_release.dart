@@ -1,8 +1,9 @@
 import 'dart:async';
 
-/// Package-internal owner of one connect attempt's resources (peer
-/// connection, data channel, connection wrapper, signaling HttpClient).
-/// Never exported — not public API.
+/// Package-internal owner of one connect attempt's resources (the transport's
+/// socket/connection wrapper and the handshake HttpClient). A transport-
+/// neutral coordinator — no WebSocket or WebRTC specifics leak in here. Never
+/// exported — not public API.
 ///
 /// The problem it solves: a resource whose creation Future is still pending
 /// when cancellation sweeps would otherwise be orphaned — the sweep sees
