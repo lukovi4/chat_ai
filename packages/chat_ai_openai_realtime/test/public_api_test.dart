@@ -53,4 +53,49 @@ void main() {
       throwsArgumentError,
     );
   });
+
+  test('maxOutputTokens: 1 and 4096 are accepted; 0, negative and 4097 are '
+      'rejected synchronously at construction (test 3)', () {
+    for (final ok in [1, 128, 4096]) {
+      expect(
+        OpenAIRealtimeChatBackend(
+          clientSecretProvider: _AppSecretProvider(),
+          maxOutputTokens: ok,
+        ),
+        isA<ChatBackend>(),
+        reason: '$ok',
+      );
+    }
+    for (final bad in [0, -1, 4097]) {
+      expect(
+        () => OpenAIRealtimeChatBackend(
+          clientSecretProvider: _AppSecretProvider(),
+          maxOutputTokens: bad,
+        ),
+        throwsArgumentError,
+        reason: '$bad',
+      );
+    }
+  });
+
+  test('responseIdleTimeout must be strictly greater than Duration.zero '
+      '(test 4)', () {
+    expect(
+      OpenAIRealtimeChatBackend(
+        clientSecretProvider: _AppSecretProvider(),
+        responseIdleTimeout: const Duration(milliseconds: 1),
+      ),
+      isA<ChatBackend>(),
+    );
+    for (final bad in [Duration.zero, const Duration(seconds: -1)]) {
+      expect(
+        () => OpenAIRealtimeChatBackend(
+          clientSecretProvider: _AppSecretProvider(),
+          responseIdleTimeout: bad,
+        ),
+        throwsArgumentError,
+        reason: '$bad',
+      );
+    }
+  });
 }

@@ -31,9 +31,29 @@ Map<String, dynamic> responseOf(Map<String, dynamic> event) =>
 List<dynamic> inputOf(Map<String, dynamic> event) =>
     responseOf(event)['input'] as List<dynamic>;
 
+/// Test wrapper over the production translator; [maxOutputTokens] defaults to
+/// the backend default so the existing structural assertions stay unchanged.
+Map<String, dynamic> buildEvent(
+  ChatRequest request, {
+  int maxOutputTokens = 4096,
+}) => buildResponseCreateEvent(request, maxOutputTokens);
+
 void main() {
+  test('the finite max_output_tokens rides inside the single response.create '
+      '(tests 1 & 2)', () {
+    // Default value.
+    expect(responseOf(buildEvent(chatRequest()))['max_output_tokens'], 4096);
+    // A custom value passes through into `response`.
+    expect(
+      responseOf(
+        buildEvent(chatRequest(), maxOutputTokens: 128),
+      )['max_output_tokens'],
+      128,
+    );
+  });
+
   test('payload is exactly one stateless text-only response.create', () {
-    final event = buildResponseCreateEvent(chatRequest(system: 'SYSTEM'));
+    final event = buildEvent(chatRequest(system: 'SYSTEM'));
     expect(event['type'], 'response.create');
     final response = responseOf(event);
     expect(response['conversation'], 'none');
@@ -49,7 +69,7 @@ void main() {
 
   test('JPEG maps to an input_image data URL (test 5)', () {
     final bytes = jpegBytes();
-    final event = buildResponseCreateEvent(
+    final event = buildEvent(
       chatRequest(
         messages: [
           message(MessageRole.user, [
@@ -73,7 +93,7 @@ void main() {
 
   test('system/user/assistant keep the required semantics and order (test 6): '
       'persisted system Messages stay system input ahead of history', () {
-    final event = buildResponseCreateEvent(
+    final event = buildEvent(
       chatRequest(
         messages: [
           message(MessageRole.user, [ContentPart.text('u1')], id: 'u1'),
@@ -132,7 +152,7 @@ void main() {
         'required': ['city'],
       },
     );
-    final event = buildResponseCreateEvent(chatRequest(tools: const [tool]));
+    final event = buildEvent(chatRequest(tools: const [tool]));
     final response = responseOf(event);
     expect(response['tools'], [
       {
@@ -147,7 +167,7 @@ void main() {
 
   test('prior ToolCallPart/ToolResultPart map to function_call and '
       'function_call_output of the next stateless input (test 9)', () {
-    final event = buildResponseCreateEvent(
+    final event = buildEvent(
       chatRequest(
         messages: [
           message(MessageRole.user, [ContentPart.text('weather?')], id: 'u1'),
@@ -195,7 +215,7 @@ void main() {
 
   test('ProviderOpaquePart never reaches the payload (test 12)', () {
     final opaqueBytes = Uint8List.fromList(utf8.encode('{"secret":"state"}'));
-    final event = buildResponseCreateEvent(
+    final event = buildEvent(
       chatRequest(
         messages: [
           message(MessageRole.user, [ContentPart.text('hi')], id: 'u1'),
@@ -215,7 +235,7 @@ void main() {
   });
 
   test('client bookkeeping never reaches the payload (test 13)', () {
-    final event = buildResponseCreateEvent(
+    final event = buildEvent(
       chatRequest(
         botId: 'bot-payload-check',
         idempotencyKey: 'idempotency-payload-check',

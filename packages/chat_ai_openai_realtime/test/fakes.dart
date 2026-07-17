@@ -104,28 +104,41 @@ class FakeConnection implements RealtimeConnection {
   Object? closeError;
   int closeCalls = 0;
 
-  @override
-  Stream<String> get events => serverEvents.stream;
+  /// When set, send() records the message but its returned Future never
+  /// completes — models a `response.create` dispatch whose Future hangs
+  /// forever, which the idle watchdog must still fire past.
+  Completer<void>? sendGate;
 
   @override
-  Future<void> send(String message) async {
+  Stream<String> get events =>
+      _InstantCancelStream<String>(serverEvents.stream);
+
+  @override
+  Future<void> send(String message) {
     final sendError = this.sendError;
     if (sendError != null) {
       throw sendError;
     }
     sent.add(message);
+    final gate = sendGate;
+    if (gate != null) {
+      return gate.future;
+    }
+    return Future<void>.value();
   }
 
   @override
-  Future<void> close() async {
+  Future<void> close() {
     closeCalls++;
     final closeError = this.closeError;
+    // Fire-and-forget the source close like a real socket close, so a fake
+    // clock never has to drive its completion; the call count is what matters.
     if (!serverEvents.isClosed) {
-      await serverEvents.close();
+      unawaited(serverEvents.close());
     }
-    if (closeError != null) {
-      throw closeError;
-    }
+    return closeError != null
+        ? Future<void>.error(closeError)
+        : Future<void>.value();
   }
 
   List<Map<String, dynamic>> get sentJson => [
@@ -136,6 +149,65 @@ class FakeConnection implements RealtimeConnection {
     for (final event in sentJson)
       if (event['type'] == 'response.create') event,
   ];
+}
+
+/// A single-subscription stream wrapper whose subscription `cancel()` always
+/// resolves right away (the real inner cancel is fired and forgotten). A real
+/// WebSocket subscription cancel completes too; this only makes that
+/// completion observable under a fake clock, where `StreamSubscription.cancel`
+/// otherwise never settles.
+class _InstantCancelStream<T> extends Stream<T> {
+  _InstantCancelStream(this._inner);
+
+  final Stream<T> _inner;
+
+  @override
+  StreamSubscription<T> listen(
+    void Function(T event)? onData, {
+    Function? onError,
+    void Function()? onDone,
+    bool? cancelOnError,
+  }) => _InstantCancelSubscription<T>(
+    _inner.listen(
+      onData,
+      onError: onError,
+      onDone: onDone,
+      cancelOnError: cancelOnError,
+    ),
+  );
+}
+
+class _InstantCancelSubscription<T> implements StreamSubscription<T> {
+  _InstantCancelSubscription(this._inner);
+
+  final StreamSubscription<T> _inner;
+
+  @override
+  Future<void> cancel() {
+    unawaited(_inner.cancel());
+    return Future<void>.value();
+  }
+
+  @override
+  void onData(void Function(T data)? handleData) => _inner.onData(handleData);
+
+  @override
+  void onError(Function? handleError) => _inner.onError(handleError);
+
+  @override
+  void onDone(void Function()? handleDone) => _inner.onDone(handleDone);
+
+  @override
+  void pause([Future<void>? resumeSignal]) => _inner.pause(resumeSignal);
+
+  @override
+  void resume() => _inner.resume();
+
+  @override
+  bool get isPaused => _inner.isPaused;
+
+  @override
+  Future<E> asFuture<E>([E? futureValue]) => _inner.asFuture(futureValue);
 }
 
 /// Collects one backend stream without ever letting an error pass silently.
@@ -193,9 +265,52 @@ String responseCreated({String id = 'resp_1'}) => jsonEncode(<String, dynamic>{
   'response': <String, dynamic>{'id': id, 'status': 'in_progress'},
 });
 
-String textDelta(String delta) => jsonEncode(<String, dynamic>{
+/// A well-formed `response.output_text.delta` of Response [responseId].
+String textDelta(
+  String delta, {
+  String responseId = 'resp_1',
+  String itemId = 'item_1',
+  int outputIndex = 0,
+  int contentIndex = 0,
+}) => jsonEncode(<String, dynamic>{
   'type': 'response.output_text.delta',
+  'response_id': responseId,
+  'item_id': itemId,
+  'output_index': outputIndex,
+  'content_index': contentIndex,
   'delta': delta,
+});
+
+/// A well-formed `response.output_text.done`.
+String textDone({
+  String text = 'Hello',
+  String responseId = 'resp_1',
+  String itemId = 'item_1',
+  int outputIndex = 0,
+  int contentIndex = 0,
+}) => jsonEncode(<String, dynamic>{
+  'type': 'response.output_text.done',
+  'response_id': responseId,
+  'item_id': itemId,
+  'output_index': outputIndex,
+  'content_index': contentIndex,
+  'text': text,
+});
+
+/// A well-formed `response.content_part.added` (or `.done` when [done]).
+String contentPart({
+  bool done = false,
+  String responseId = 'resp_1',
+  String itemId = 'item_1',
+  int outputIndex = 0,
+  int contentIndex = 0,
+}) => jsonEncode(<String, dynamic>{
+  'type': done ? 'response.content_part.done' : 'response.content_part.added',
+  'response_id': responseId,
+  'item_id': itemId,
+  'output_index': outputIndex,
+  'content_index': contentIndex,
+  'part': <String, dynamic>{'type': 'text', 'text': ''},
 });
 
 Map<String, dynamic> usageJson({int input = 10, int output = 5}) =>
@@ -225,10 +340,14 @@ String functionCallItemAdded({
   int outputIndex = 0,
   String callId = 'call_1',
   String name = 'get_weather',
+  String responseId = 'resp_1',
+  String itemId = 'item_1',
 }) => jsonEncode(<String, dynamic>{
   'type': 'response.output_item.added',
+  'response_id': responseId,
   'output_index': outputIndex,
   'item': <String, dynamic>{
+    'id': itemId,
     'type': 'function_call',
     'call_id': callId,
     'name': name,
@@ -236,16 +355,32 @@ String functionCallItemAdded({
   },
 });
 
-String functionCallArgsDelta(String delta, {int outputIndex = 0}) =>
-    jsonEncode(<String, dynamic>{
-      'type': 'response.function_call_arguments.delta',
-      'output_index': outputIndex,
-      'delta': delta,
-    });
+String functionCallArgsDelta(
+  String delta, {
+  int outputIndex = 0,
+  String responseId = 'resp_1',
+  String itemId = 'item_1',
+  String callId = 'call_1',
+}) => jsonEncode(<String, dynamic>{
+  'type': 'response.function_call_arguments.delta',
+  'response_id': responseId,
+  'item_id': itemId,
+  'call_id': callId,
+  'output_index': outputIndex,
+  'delta': delta,
+});
 
-String functionCallArgsDone(String arguments, {int outputIndex = 0}) =>
-    jsonEncode(<String, dynamic>{
-      'type': 'response.function_call_arguments.done',
-      'output_index': outputIndex,
-      'arguments': arguments,
-    });
+String functionCallArgsDone(
+  String arguments, {
+  int outputIndex = 0,
+  String responseId = 'resp_1',
+  String itemId = 'item_1',
+  String callId = 'call_1',
+}) => jsonEncode(<String, dynamic>{
+  'type': 'response.function_call_arguments.done',
+  'response_id': responseId,
+  'item_id': itemId,
+  'call_id': callId,
+  'output_index': outputIndex,
+  'arguments': arguments,
+});

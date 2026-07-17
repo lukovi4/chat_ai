@@ -21,7 +21,15 @@ import 'package:chat_ai/chat_ai.dart';
 /// items in chronological order, ahead of the ordinary history; user and
 /// assistant Messages keep their chronological order and the order of their
 /// content parts / tool exchanges.
-Map<String, dynamic> buildResponseCreateEvent(ChatRequest request) {
+///
+/// [maxOutputTokens] is the finite `max_output_tokens` cap placed inside
+/// `response` (the app-configured backend value; OpenAI's own default is the
+/// unbounded `inf`, which this package never uses). It is validated by the
+/// backend before it reaches here — this pure mapper passes it through.
+Map<String, dynamic> buildResponseCreateEvent(
+  ChatRequest request,
+  int maxOutputTokens,
+) {
   final systemInput = <Map<String, dynamic>>[];
   final historyInput = <Map<String, dynamic>>[];
 
@@ -44,6 +52,7 @@ Map<String, dynamic> buildResponseCreateEvent(ChatRequest request) {
       'instructions': request.system,
       'input': [...systemInput, ...historyInput],
       'parallel_tool_calls': false,
+      'max_output_tokens': maxOutputTokens,
       if (request.tools.isNotEmpty)
         'tools': [
           for (final tool in request.tools)

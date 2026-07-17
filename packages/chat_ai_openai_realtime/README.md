@@ -7,8 +7,10 @@ server code.
 
 ```dart
 final backend = OpenAIRealtimeChatBackend(
-  clientSecretProvider: MyAppSecretProvider(), // implemented by the app
-  // model: 'gpt-realtime-2.1',                // optional; this is the default
+  clientSecretProvider: MyAppSecretProvider(),   // implemented by the app
+  // model: 'gpt-realtime-2.1',                   // optional; the default
+  // maxOutputTokens: 4096,                        // optional; the default
+  // responseIdleTimeout: Duration(seconds: 60),  // optional; the default
 );
 final session = ChatSession(backend: backend, botProfile: profile);
 ```
@@ -43,14 +45,37 @@ final session = ChatSession(backend: backend, botProfile: profile);
 - `ProviderOpaquePart` is skipped entirely (regardless of provider): OpenAI
   Realtime has no encrypted-reasoning continuity input.
 
+## Output bound & idle watchdog
+
+- **`maxOutputTokens`** (default `4096`; range `1…4096`, tool-call tokens
+  included) is placed as a finite `max_output_tokens` inside every
+  `response.create`. OpenAI's own default is the unbounded `inf`, which this
+  package never uses. It is an **upper bound on output, not a guarantee of a
+  specific bill**.
+- **`responseIdleTimeout`** (default `60 s`, must be `> Duration.zero`) is a
+  post-commit **idle** watchdog — not an absolute cap on total response
+  duration. It is armed the instant a `response.create` may have been
+  dispatched and reset on every real Response progress event (the first
+  `response.created`, a non-empty text delta, tool-call progress, etc.). If
+  the server reports no progress for the whole timeout, the leg sends one
+  best-effort `response.cancel` and ends as a single terminal
+  `ErrorEvent(upstream, 'response-idle-timeout')`, then tears the session
+  down. Invalid values throw `ArgumentError` at construction, before any
+  token request or network I/O.
+
 ## Money safety
 
 - **This backend performs no retries and there is no server replay /
-  idempotency layer.** Before the `response.create` dispatch, transport
-  failures end as `network` — the `chat_ai` Core may silently retry them,
-  which is safe because inference was never requested. From the instant the
-  serialized `response.create` is handed to the socket, every failure is
-  terminal `upstream`, so the Core never re-runs a possibly-billed call.
+  idempotency layer** — the idle timeout is no exception: it never reconnects,
+  never re-dispatches and never issues a second `response.create` or a new
+  ephemeral secret. **Inference that already ran before a timeout may still be
+  billed** (the best-effort `response.cancel` cannot un-bill it).
+- Before the `response.create` dispatch, transport failures end as `network` —
+  the `chat_ai` Core may silently retry them, which is safe because inference
+  was never requested. From the instant the serialized `response.create` is
+  handed to the socket, every failure (the idle timeout included) is terminal
+  `upstream` — never `network`/`rate`/`overloaded` — so the Core never re-runs
+  a possibly-billed call.
 - **An explicit resend/regenerate may be a new billable call.** The wire
   `idempotencyKey` is not sent to OpenAI and deduplicates nothing here.
 - Cancelling the reply is a wire-cancel: best-effort `response.cancel`,

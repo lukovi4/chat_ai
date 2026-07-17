@@ -24,6 +24,8 @@ start({FakeTransport? transport, ClientSecretProvider? provider}) {
     clientSecretProvider: provider ?? RecordingSecretProvider(),
     transport: effectiveTransport,
     request: chatRequest(),
+    maxOutputTokens: 4096,
+    responseIdleTimeout: const Duration(seconds: 60),
   );
   return (
     collector: Collector(stream),

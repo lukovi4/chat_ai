@@ -15,6 +15,11 @@ import 'websocket_realtime_transport.dart';
 /// ephemeral credential — the client secret is not a secure model pin.
 const String defaultRealtimeModel = 'gpt-realtime-2.1';
 
+/// The inclusive upper bound OpenAI Realtime accepts for `max_output_tokens`
+/// (1…4096; the value covers tool-call tokens too). OpenAI's own default is
+/// the unbounded `inf`, which this package never uses.
+const int _maxOutputTokensCeiling = 4096;
+
 /// The OpenAI Realtime [ChatBackend]: each [send] leg runs over its own direct
 /// OpenAI Realtime WebSocket (`wss://api.openai.com/v1/realtime`) as exactly
 /// one out-of-band `response.create` (`conversation: "none"`, stateless input,
@@ -31,15 +36,33 @@ const String defaultRealtimeModel = 'gpt-realtime-2.1';
 /// (called anew per leg, receives only the bot id); token issuance, limits and
 /// spend protection belong to the app.
 class OpenAIRealtimeChatBackend implements ChatBackend {
-  /// [model] is the Realtime model requested in the WebSocket URL; it defaults
-  /// to [defaultRealtimeModel]. It must be non-empty (whitespace-only is
-  /// rejected here, before any token request or network I/O) and must match
-  /// the model the app's mint endpoint binds to the ephemeral credential.
+  /// [model] is the Realtime model requested in the WebSocket URL (default
+  /// [defaultRealtimeModel]); it must be non-empty (whitespace-only rejected)
+  /// and match the model the app's mint endpoint binds to the credential.
+  ///
+  /// [maxOutputTokens] is the finite `max_output_tokens` placed inside every
+  /// `response.create` (default 4096; accepted range 1…4096, tool-call tokens
+  /// included). It is an upper bound on output, not a guarantee of a specific
+  /// bill.
+  ///
+  /// [responseIdleTimeout] is a post-commit idle watchdog (default 60 s): if
+  /// the server reports no Response progress for this long after a possible
+  /// `response.create` dispatch, the leg ends as one terminal `upstream`
+  /// (`response-idle-timeout`) after a best-effort `response.cancel` — never a
+  /// retry, never a second billable call. It must be strictly greater than
+  /// [Duration.zero].
+  ///
+  /// All invalid values throw [ArgumentError] synchronously at construction,
+  /// before any client-secret request or network I/O.
   OpenAIRealtimeChatBackend({
     required ClientSecretProvider clientSecretProvider,
     String model = defaultRealtimeModel,
+    int maxOutputTokens = _maxOutputTokensCeiling,
+    Duration responseIdleTimeout = const Duration(seconds: 60),
   }) : _clientSecretProvider = clientSecretProvider,
-       _model = model {
+       _model = model,
+       _maxOutputTokens = maxOutputTokens,
+       _responseIdleTimeout = responseIdleTimeout {
     if (_model.trim().isEmpty) {
       throw ArgumentError.value(
         model,
@@ -47,15 +70,33 @@ class OpenAIRealtimeChatBackend implements ChatBackend {
         'Realtime model must be a non-empty, non-whitespace string',
       );
     }
+    if (maxOutputTokens < 1 || maxOutputTokens > _maxOutputTokensCeiling) {
+      throw ArgumentError.value(
+        maxOutputTokens,
+        'maxOutputTokens',
+        'must be an integer in 1..$_maxOutputTokensCeiling',
+      );
+    }
+    if (responseIdleTimeout <= Duration.zero) {
+      throw ArgumentError.value(
+        responseIdleTimeout,
+        'responseIdleTimeout',
+        'must be strictly greater than Duration.zero',
+      );
+    }
   }
 
   final ClientSecretProvider _clientSecretProvider;
   final String _model;
+  final int _maxOutputTokens;
+  final Duration _responseIdleTimeout;
 
   @override
   Stream<BackendEvent> send(ChatRequest request) => runRealtimeSend(
     clientSecretProvider: _clientSecretProvider,
     transport: WebSocketRealtimeTransport(model: _model),
     request: request,
+    maxOutputTokens: _maxOutputTokens,
+    responseIdleTimeout: _responseIdleTimeout,
   );
 }

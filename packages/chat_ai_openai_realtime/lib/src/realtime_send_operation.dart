@@ -28,16 +28,23 @@ import 'realtime_request_translator.dart';
 import 'realtime_transport.dart';
 
 /// Runs one backend leg. Package-internal seam: the public backend passes
-/// the production WebSocket transport; tests pass a fake.
+/// the production WebSocket transport; tests pass a fake. [maxOutputTokens]
+/// rides inside the single `response.create`; [responseIdleTimeout] arms the
+/// post-commit idle watchdog. Both are validated by the public backend before
+/// this is ever called.
 Stream<BackendEvent> runRealtimeSend({
   required ClientSecretProvider clientSecretProvider,
   required RealtimeTransport transport,
   required ChatRequest request,
+  required int maxOutputTokens,
+  required Duration responseIdleTimeout,
 }) {
   return _RealtimeSendOperation(
     clientSecretProvider,
     transport,
     request,
+    maxOutputTokens,
+    responseIdleTimeout,
   ).stream;
 }
 
@@ -52,7 +59,13 @@ class _CallState {
 }
 
 class _RealtimeSendOperation {
-  _RealtimeSendOperation(this._provider, this._transport, this._request) {
+  _RealtimeSendOperation(
+    this._provider,
+    this._transport,
+    this._request,
+    this._maxOutputTokens,
+    this._idleTimeout,
+  ) {
     _controller = StreamController<BackendEvent>(
       onListen: () => unawaited(_run()),
       onCancel: _onSubscriptionCancel,
@@ -62,6 +75,14 @@ class _RealtimeSendOperation {
   final ClientSecretProvider _provider;
   final RealtimeTransport _transport;
   final ChatRequest _request;
+  final int _maxOutputTokens;
+  final Duration _idleTimeout;
+
+  /// The post-commit idle watchdog. Armed exactly at the money-safe commit
+  /// point (before the `response.create` send), reset only on real Response
+  /// progress, and cancelled by any terminal/cancel. Null before the commit
+  /// boundary and after any terminal.
+  Timer? _idleTimer;
 
   late final StreamController<BackendEvent> _controller;
 
@@ -158,18 +179,24 @@ class _RealtimeSendOperation {
       onDone: _handleTransportDone,
     );
 
-    // 8. Exactly one `response.create`. A local build defect never dispatches.
+    // 8. Exactly one `response.create` (carrying the finite max_output_tokens).
+    // A local build defect never dispatches.
     final String payload;
     try {
-      payload = jsonEncode(buildResponseCreateEvent(_request));
+      payload = jsonEncode(
+        buildResponseCreateEvent(_request, _maxOutputTokens),
+      );
     } catch (_) {
       _finishError(FailureCause.upstream, 'request-build-failed');
       return;
     }
     // ---- MONEY-SAFE COMMIT BOUNDARY ----------------------------------------
     // Set BEFORE the transport send, not after its success: even a
-    // synchronous exception below is an ambiguous possible dispatch.
+    // synchronous exception below is an ambiguous possible dispatch. The idle
+    // watchdog is armed HERE, before the send, so it also fires the leg to a
+    // terminal if the `response.create` send Future itself hangs forever.
     _dispatchMayHaveReachedProvider = true;
+    _armIdleWatchdog();
     try {
       await connection.send(payload);
     } catch (_) {
@@ -179,7 +206,66 @@ class _RealtimeSendOperation {
       _finishError(FailureCause.upstream, 'transport-send-failed');
       return;
     }
-    // From here the leg is driven by server events (or transport death).
+    // From here the leg is driven by server events, transport death or the
+    // idle watchdog.
+  }
+
+  /// Arms the idle watchdog at the commit boundary. A no-op if a terminal
+  /// already fired (e.g. a very fast provider error), so it never re-arms.
+  void _armIdleWatchdog() {
+    if (_finished || _cancelled) {
+      return;
+    }
+    _idleTimer = Timer(_idleTimeout, _onIdleTimeout);
+  }
+
+  /// Real Response progress: cancel the running countdown and start a fresh
+  /// one. A no-op before the watchdog is armed or after any terminal/cancel —
+  /// so non-progress and late signals never revive a finished leg.
+  void _noteProgress() {
+    if (_idleTimer == null || _finished || _cancelled) {
+      return;
+    }
+    _idleTimer!.cancel();
+    _idleTimer = Timer(_idleTimeout, _onIdleTimeout);
+  }
+
+  /// The idle deadline elapsed with no Response progress. Post-commit by
+  /// construction (the timer only exists after the commit boundary): a
+  /// best-effort, non-blocking `response.cancel`, then exactly one terminal
+  /// `upstream` — never `network`/`rate`/`overloaded` — and the existing
+  /// memoized teardown. No new secret, no new connection, no second
+  /// `response.create`.
+  void _onIdleTimeout() {
+    if (_finished || _cancelled) {
+      return;
+    }
+    _bestEffortResponseCancel();
+    _finishError(FailureCause.upstream, 'response-idle-timeout');
+  }
+
+  /// One best-effort `response.cancel` (NOT a `response.create`): fired without
+  /// awaiting, its sync/async error swallowed so it never becomes an unhandled
+  /// zone error and never delays the terminal.
+  void _bestEffortResponseCancel() {
+    final connection = _connection;
+    if (connection == null) {
+      return;
+    }
+    try {
+      unawaited(
+        connection
+            .send(
+              jsonEncode(<String, dynamic>{
+                'type': 'response.cancel',
+                if (_responseId != null) 'response_id': _responseId,
+              }),
+            )
+            .then<void>((_) {}, onError: (Object _) {}),
+      );
+    } catch (_) {
+      // A synchronous send failure is swallowed too.
+    }
   }
 
   /// Awaits one setup step, abandoning the wait the instant the operation
@@ -245,30 +331,63 @@ class _RealtimeSendOperation {
     }
     switch (decoded['type']) {
       case 'response.created':
+        // The FIRST response.created is progress (see _handleResponseCreated);
+        // a repeat is not, so the reset is guarded there by _acceptedEmitted.
         _handleResponseCreated(decoded);
       case 'response.output_text.delta':
         final Object? delta = decoded['delta'];
         if (delta is! String) {
           _finishError(FailureCause.upstream, 'malformed-event');
         } else if (delta.isNotEmpty) {
-          // Transparent passthrough: never merge, split or reorder; drop
-          // empties.
+          // The event→BackendEvent mapping is unchanged: a non-empty delta is
+          // emitted transparently. The watchdog reset is separate and only
+          // fires when the event is real progress of the CURRENT Response.
+          if (_isRealProgress('response.output_text.delta', decoded)) {
+            _noteProgress();
+          }
           _emit(BackendEvent.delta(delta));
         }
+      case 'response.output_text.done':
+      case 'response.content_part.added':
+      case 'response.content_part.done':
+        // Signal-only progress markers: reset the countdown (only when they
+        // are real progress of the current Response) but produce no
+        // BackendEvent.
+        if (_isRealProgress(decoded['type'] as String, decoded)) {
+          _noteProgress();
+        }
       case 'response.output_item.added':
+        if (_isRealProgress('response.output_item.added', decoded)) {
+          _noteProgress();
+        }
         _handleOutputItem(decoded, itemClosed: false);
       case 'response.output_item.done':
+        if (_isRealProgress('response.output_item.done', decoded)) {
+          _noteProgress();
+        }
         _handleOutputItem(decoded, itemClosed: true);
       case 'response.function_call_arguments.delta':
         final call = _calls[decoded['output_index']];
         final Object? delta = decoded['delta'];
         if (call != null && delta is String) {
+          if (_isRealProgress(
+            'response.function_call_arguments.delta',
+            decoded,
+          )) {
+            _noteProgress();
+          }
           call.deltaArgs += delta;
         }
       case 'response.function_call_arguments.done':
         final call = _calls[decoded['output_index']];
         final Object? arguments = decoded['arguments'];
         if (call != null && arguments is String) {
+          if (_isRealProgress(
+            'response.function_call_arguments.done',
+            decoded,
+          )) {
+            _noteProgress();
+          }
           call.finalArgs = arguments;
         }
       case 'error':
@@ -280,17 +399,84 @@ class _RealtimeSendOperation {
     }
   }
 
+  /// The watchdog attribution: is [event] of [type] real progress of the
+  /// CURRENT Response? Deliberately NOT a full JSON-Schema parser — only the
+  /// minimal structure needed to reject malformed and foreign events.
+  ///
+  /// Two gates apply to every progress event: (1) the current Response id must
+  /// already be known (from the first valid `response.created`), and (2) the
+  /// event's `response_id` must be that exact id. Until a valid Response id is
+  /// known, nothing counts as progress. Each type then adds its own minimum
+  /// structure.
+  bool _isRealProgress(String type, Map<String, dynamic> event) {
+    final currentId = _responseId;
+    if (currentId == null) {
+      return false;
+    }
+    final Object? responseId = event['response_id'];
+    if (responseId is! String || responseId != currentId) {
+      return false;
+    }
+    switch (type) {
+      case 'response.output_text.delta':
+        return _nonNegativeInt(event['output_index']) &&
+            _nonNegativeInt(event['content_index']) &&
+            event['item_id'] is String &&
+            event['delta'] is String &&
+            (event['delta'] as String).isNotEmpty;
+      case 'response.output_text.done':
+        return _nonNegativeInt(event['output_index']) &&
+            _nonNegativeInt(event['content_index']) &&
+            event['item_id'] is String &&
+            event['text'] is String;
+      case 'response.content_part.added':
+      case 'response.content_part.done':
+        return _nonNegativeInt(event['output_index']) &&
+            _nonNegativeInt(event['content_index']) &&
+            event['item_id'] is String &&
+            event['part'] is Map<String, dynamic>;
+      case 'response.output_item.added':
+      case 'response.output_item.done':
+        final Object? item = event['item'];
+        return _nonNegativeInt(event['output_index']) &&
+            item is Map<String, dynamic> &&
+            item['type'] is String &&
+            (item['type'] as String).isNotEmpty;
+      case 'response.function_call_arguments.delta':
+        final Object? index = event['output_index'];
+        return index is int &&
+            _calls.containsKey(index) &&
+            event['delta'] is String &&
+            (event['delta'] as String).isNotEmpty;
+      case 'response.function_call_arguments.done':
+        final Object? index = event['output_index'];
+        return index is int &&
+            _calls.containsKey(index) &&
+            event['arguments'] is String;
+      default:
+        return false;
+    }
+  }
+
+  static bool _nonNegativeInt(Object? value) => value is int && value >= 0;
+
   /// `Accepted` means exactly one thing: the server event `response.created`
   /// arrived. It is never emitted for the secret, the WebSocket handshake or
   /// the local dispatch.
   void _handleResponseCreated(Map<String, dynamic> event) {
     final Object? response = event['response'];
-    if (response is Map<String, dynamic>) {
-      final Object? id = response['id'];
-      if (_responseId == null && id is String && id.isNotEmpty) {
-        _responseId = id;
-      }
+    final Object? id = response is Map<String, dynamic> ? response['id'] : null;
+    final bool firstValidId =
+        _responseId == null && id is String && id.isNotEmpty;
+    if (firstValidId) {
+      // Only the FIRST response.created carrying a non-empty response.id binds
+      // the current Response and counts as progress; a repeat (or an id-less
+      // event) resets nothing.
+      _responseId = id;
+      _noteProgress();
     }
+    // The event→BackendEvent mapping is unchanged: Accepted is emitted once on
+    // the first response.created regardless of the id.
     if (!_acceptedEmitted) {
       _acceptedEmitted = true;
       _emit(const BackendEvent.accepted());
@@ -514,9 +700,17 @@ class _RealtimeSendOperation {
       return;
     }
     _finished = true;
+    // Any terminal (provider done/error, transport death, idle timeout)
+    // disarms the watchdog so a late timer callback can never emit.
+    _cancelIdleWatchdog();
     _controller.add(terminal);
     unawaited(_controller.close());
     unawaited(_teardown());
+  }
+
+  void _cancelIdleWatchdog() {
+    _idleTimer?.cancel();
+    _idleTimer = null;
   }
 
   void _finishError(FailureCause cause, String detail, {Usage? usage}) {
@@ -541,6 +735,9 @@ class _RealtimeSendOperation {
   /// its delivery chance.
   Future<void> _onSubscriptionCancel() async {
     _cancelled = true;
+    // The subscriber cancel disarms the watchdog: no late idle-timeout
+    // terminal after the user has cancelled.
+    _cancelIdleWatchdog();
     if (_dispatchMayHaveReachedProvider && !_finished) {
       final connection = _connection;
       if (connection != null) {

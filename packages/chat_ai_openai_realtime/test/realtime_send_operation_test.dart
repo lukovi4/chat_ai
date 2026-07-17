@@ -2,13 +2,23 @@
 // the money-safe commit boundary and the never-throws stream contract
 // (tests 1–4, 8, 10, 11, 14–17, 20–22 of the task's minimum set).
 
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:chat_ai/chat_ai.dart';
 import 'package:chat_ai_openai_realtime/src/realtime_send_operation.dart';
+import 'package:fake_async/fake_async.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'fakes.dart';
+
+/// JSON of a Realtime event with an arbitrary [type] (for non-progress /
+/// unknown events the watchdog must ignore).
+String eventOfType(String type, [Map<String, dynamic> extra = const {}]) =>
+    jsonEncode(<String, dynamic>{'type': type, ...extra});
+
+int cancelsIn(FakeConnection connection) =>
+    connection.sentJson.where((m) => m['type'] == 'response.cancel').length;
 
 ({
   Collector collector,
@@ -20,6 +30,8 @@ start({
   RecordingSecretProvider? provider,
   FakeTransport? transport,
   ChatRequest? request,
+  int maxOutputTokens = 4096,
+  Duration responseIdleTimeout = const Duration(seconds: 60),
 }) {
   final effectiveProvider = provider ?? RecordingSecretProvider();
   final effectiveTransport = transport ?? FakeTransport();
@@ -27,6 +39,8 @@ start({
     clientSecretProvider: effectiveProvider,
     transport: effectiveTransport,
     request: request ?? chatRequest(),
+    maxOutputTokens: maxOutputTokens,
+    responseIdleTimeout: responseIdleTimeout,
   );
   return (
     collector: Collector(stream),
@@ -411,4 +425,407 @@ void main() {
     expect(errorRun.collector.events.single, isA<ErrorEvent>());
     expect(errorRun.collector.done, isTrue);
   });
+
+  // --- response idle watchdog (deterministic fake clock) --------------------
+
+  const idle = Duration(seconds: 60);
+
+  test('the idle watchdog does not exist before the commit boundary '
+      '(test 5)', () {
+    fakeAsync((async) {
+      // Connect never completes → the leg never reaches the commit boundary,
+      // so no timer is ever armed.
+      final transport = FakeTransport()..gate = Completer<void>();
+      final run = start(transport: transport, responseIdleTimeout: idle);
+      async.flushMicrotasks();
+      async.elapse(const Duration(minutes: 10));
+      expect(run.collector.events, isEmpty);
+      expect(run.collector.done, isFalse);
+      expect(async.pendingTimers, isEmpty);
+      run.collector.subscription.cancel();
+      async.flushMicrotasks();
+    });
+  });
+
+  test('the watchdog is armed just before send, fires a forever-hung '
+      'response.create, and tears the leg down exactly once (tests 6, 13, '
+      '17)', () {
+    fakeAsync((async) {
+      final transport = FakeTransport();
+      transport.connection.sendGate = Completer<void>(); // send hangs forever
+      final run = start(transport: transport, responseIdleTimeout: idle);
+      async.flushMicrotasks();
+      // The response.create was handed to the (hung) transport.
+      expect(run.connection.sentResponseCreates, hasLength(1));
+      expect(run.collector.events, isEmpty);
+      async.elapse(idle);
+      async.flushMicrotasks();
+      // One terminal, and the leg actually completed and closed.
+      final error = run.collector.events.single as ErrorEvent;
+      expect(error.cause, FailureCause.upstream);
+      expect(error.detail, 'response-idle-timeout');
+      expect(run.collector.errors, isEmpty);
+      expect(run.collector.done, isTrue);
+      expect(run.connection.closeCalls, 1);
+      // No retry/reconnect/second dispatch: one create, at most one cancel,
+      // provider and connect exactly once.
+      expect(run.provider.calls, 1);
+      expect(run.transport.connectCalls, 1);
+      expect(run.connection.sentResponseCreates, hasLength(1));
+      expect(cancelsIn(run.connection), 1);
+    });
+  });
+
+  test('after a timeout, a late-completing hung response.create send (success '
+      'OR error) yields no second terminal, no retry and no unhandled zone '
+      'error; close stays exactly once', () {
+    for (final completeWithError in [false, true]) {
+      final zoneErrors = <Object>[];
+      runZonedGuarded(() {
+        fakeAsync((async) {
+          final transport = FakeTransport();
+          final gate = Completer<void>();
+          transport.connection.sendGate = gate;
+          final run = start(transport: transport, responseIdleTimeout: idle);
+          async.flushMicrotasks();
+          async.elapse(idle);
+          async.flushMicrotasks();
+          expect(run.collector.events, hasLength(1));
+          expect(run.connection.closeCalls, 1);
+          // The hung response.create send Future settles only NOW, long after
+          // the terminal.
+          if (completeWithError) {
+            gate.completeError(StateError('late send failure'));
+          } else {
+            gate.complete();
+          }
+          async.flushMicrotasks();
+          // Still exactly one terminal and one close; no new create/connect.
+          expect(run.collector.events, hasLength(1));
+          expect(run.connection.closeCalls, 1);
+          expect(run.connection.sentResponseCreates, hasLength(1));
+          expect(run.transport.connectCalls, 1);
+        });
+      }, (error, _) => zoneErrors.add(error));
+      expect(
+        zoneErrors,
+        isEmpty,
+        reason: 'completeWithError=$completeWithError',
+      );
+    }
+  });
+
+  test('no terminal strictly before the deadline; exactly one upstream/'
+      'response-idle-timeout at the deadline (test 7)', () {
+    fakeAsync((async) {
+      final run = start(responseIdleTimeout: idle);
+      async.flushMicrotasks();
+      async.elapse(const Duration(seconds: 59));
+      expect(run.collector.events, isEmpty);
+      async.elapse(const Duration(seconds: 1));
+      final error = run.collector.events.single as ErrorEvent;
+      expect(error.cause, FailureCause.upstream);
+      expect(error.detail, 'response-idle-timeout');
+    });
+  });
+
+  test('response.created and a non-empty text delta each reset the countdown '
+      '(test 8)', () {
+    fakeAsync((async) {
+      final run = start(responseIdleTimeout: idle);
+      async.flushMicrotasks();
+      async.elapse(const Duration(seconds: 40));
+      run.connection.serverEvents.add(responseCreated());
+      async.flushMicrotasks();
+      async.elapse(const Duration(seconds: 40)); // 40s since reset < 60
+      run.connection.serverEvents.add(textDelta('hi'));
+      async.flushMicrotasks();
+      async.elapse(const Duration(seconds: 40)); // 40s since reset < 60
+      expect(
+        run.collector.events.whereType<ErrorEvent>(),
+        isEmpty,
+        reason: 'progress kept resetting the countdown',
+      );
+      async.elapse(const Duration(seconds: 20)); // now 60s idle since last
+      expect(
+        (run.collector.events.last as ErrorEvent).detail,
+        'response-idle-timeout',
+      );
+    });
+  });
+
+  test('tool-call progress of the current Response resets the countdown '
+      '(test 9)', () {
+    fakeAsync((async) {
+      final run = start(responseIdleTimeout: idle);
+      async.flushMicrotasks();
+      // The Response must be established first: only then are its progress
+      // events attributable.
+      run.connection.serverEvents.add(responseCreated());
+      async.flushMicrotasks();
+      async.elapse(const Duration(seconds: 40));
+      run.connection.serverEvents.add(functionCallItemAdded());
+      async.flushMicrotasks();
+      async.elapse(const Duration(seconds: 40));
+      run.connection.serverEvents.add(functionCallArgsDelta('{"c'));
+      async.flushMicrotasks();
+      async.elapse(const Duration(seconds: 40));
+      run.connection.serverEvents.add(functionCallArgsDone('{"c":1}'));
+      async.flushMicrotasks();
+      async.elapse(const Duration(seconds: 40));
+      expect(run.collector.events.whereType<ErrorEvent>(), isEmpty);
+      async.elapse(const Duration(seconds: 20));
+      expect(
+        (run.collector.events.last as ErrorEvent).detail,
+        'response-idle-timeout',
+      );
+    });
+  });
+
+  test('an event carrying a DIFFERENT response_id does not reset the '
+      'countdown', () {
+    fakeAsync((async) {
+      final run = start(responseIdleTimeout: idle);
+      async.flushMicrotasks();
+      run.connection.serverEvents.add(responseCreated()); // binds resp_1
+      async.flushMicrotasks();
+      async.elapse(const Duration(seconds: 55));
+      // A well-formed delta but of a FOREIGN Response.
+      run.connection.serverEvents.add(textDelta('x', responseId: 'other_resp'));
+      async.flushMicrotasks();
+      async.elapse(const Duration(seconds: 5)); // 60s since response.created
+      expect(
+        (run.collector.events.last as ErrorEvent).detail,
+        'response-idle-timeout',
+      );
+    });
+  });
+
+  test('structurally incomplete look-alike progress events do NOT reset the '
+      'countdown', () {
+    fakeAsync((async) {
+      final run = start(responseIdleTimeout: idle);
+      async.flushMicrotasks();
+      run.connection.serverEvents.add(responseCreated());
+      async.flushMicrotasks();
+      async.elapse(const Duration(seconds: 55));
+      // Each of these has the right type + response_id but is missing the
+      // type-specific minimum structure.
+      run.connection.serverEvents
+        // text delta: missing item_id / indices
+        ..add(
+          eventOfType('response.output_text.delta', {
+            'response_id': 'resp_1',
+            'delta': 'x',
+          }),
+        )
+        // content part: missing `part`
+        ..add(
+          eventOfType('response.content_part.added', {
+            'response_id': 'resp_1',
+            'item_id': 'item_1',
+            'output_index': 0,
+            'content_index': 0,
+          }),
+        )
+        // output item: item without a non-empty `type`
+        ..add(
+          eventOfType('response.output_item.added', {
+            'response_id': 'resp_1',
+            'output_index': 0,
+            'item': <String, dynamic>{'id': 'item_1'},
+          }),
+        )
+        // function args delta: no matching call state yet
+        ..add(
+          eventOfType('response.function_call_arguments.delta', {
+            'response_id': 'resp_1',
+            'output_index': 9,
+            'delta': '{',
+          }),
+        );
+      async.flushMicrotasks();
+      async.elapse(const Duration(seconds: 5)); // still the original deadline
+      expect(
+        (run.collector.events.last as ErrorEvent).detail,
+        'response-idle-timeout',
+      );
+    });
+  });
+
+  test('a non-empty text delta with a NON-matching response_id still emits its '
+      'Delta (mapping unchanged) but does NOT extend the watchdog', () {
+    fakeAsync((async) {
+      final run = start(responseIdleTimeout: idle);
+      async.flushMicrotasks();
+      run.connection.serverEvents.add(responseCreated()); // binds resp_1
+      async.flushMicrotasks();
+      async.elapse(const Duration(seconds: 55));
+      run.connection.serverEvents.add(
+        textDelta('visible', responseId: 'foreign'),
+      );
+      async.flushMicrotasks();
+      // The Delta is still delivered (event→BackendEvent mapping is unchanged)…
+      expect(
+        run.collector.events.whereType<Delta>().map((d) => d.text),
+        contains('visible'),
+      );
+      // …but it did not reset the countdown, which still fires at 60s.
+      async.elapse(const Duration(seconds: 5));
+      expect(
+        (run.collector.events.last as ErrorEvent).detail,
+        'response-idle-timeout',
+      );
+    });
+  });
+
+  test('rate_limits.updated, unknown events and an empty delta do NOT reset '
+      'the countdown (test 10)', () {
+    fakeAsync((async) {
+      final run = start(responseIdleTimeout: idle);
+      async.flushMicrotasks();
+      async.elapse(const Duration(seconds: 55));
+      run.connection.serverEvents
+        ..add(eventOfType('rate_limits.updated'))
+        ..add(eventOfType('some.unknown.event'))
+        ..add(textDelta('')); // empty delta
+      async.flushMicrotasks();
+      // None of those reset it → it still fires at the original 60s.
+      async.elapse(const Duration(seconds: 5));
+      expect(
+        (run.collector.events.last as ErrorEvent).detail,
+        'response-idle-timeout',
+      );
+    });
+  });
+
+  test('a successful response.done cancels the timer; advancing the clock '
+      'afterwards changes nothing (test 11)', () {
+    fakeAsync((async) {
+      final run = start(responseIdleTimeout: idle);
+      async.flushMicrotasks();
+      run.connection.serverEvents.add(responseDoneCompleted());
+      async.flushMicrotasks();
+      expect(run.collector.events.single, isA<DoneEvent>());
+      expect(async.pendingTimers, isEmpty);
+      async.elapse(const Duration(minutes: 10));
+      expect(run.collector.events.single, isA<DoneEvent>()); // still just Done
+    });
+  });
+
+  test(
+    'subscription cancel cancels the timer; no late ErrorEvent (test 12)',
+    () {
+      fakeAsync((async) {
+        final run = start(responseIdleTimeout: idle);
+        async.flushMicrotasks();
+        run.collector.subscription.cancel();
+        async.flushMicrotasks();
+        async.elapse(const Duration(minutes: 10));
+        expect(run.collector.events.whereType<ErrorEvent>(), isEmpty);
+        expect(async.pendingTimers, isEmpty);
+      });
+    },
+  );
+
+  test('a timeout sends at most one response.cancel and one response.create; '
+      'provider and connect ran exactly once (test 13)', () {
+    fakeAsync((async) {
+      final run = start(responseIdleTimeout: idle);
+      async.flushMicrotasks();
+      async.elapse(idle);
+      async.flushMicrotasks();
+      expect(run.provider.calls, 1);
+      expect(run.transport.connectCalls, 1);
+      expect(run.connection.sentResponseCreates, hasLength(1));
+      expect(cancelsIn(run.connection), 1);
+    });
+  });
+
+  test('a failing best-effort response.cancel does not change the timeout '
+      'terminal and never becomes an unhandled error (test 14)', () {
+    final zoneErrors = <Object>[];
+    runZonedGuarded(() {
+      fakeAsync((async) {
+        final transport = FakeTransport();
+        final run = start(transport: transport, responseIdleTimeout: idle);
+        async.flushMicrotasks();
+        // The response.cancel send throws.
+        transport.connection.sendError = StateError('cancel failed');
+        async.elapse(idle);
+        async.flushMicrotasks();
+        final error = run.collector.events.single as ErrorEvent;
+        expect(error.cause, FailureCause.upstream);
+        expect(error.detail, 'response-idle-timeout');
+      });
+    }, (error, _) => zoneErrors.add(error));
+    expect(zoneErrors, isEmpty);
+  });
+
+  test('timeout and response.done are first-terminal-wins in both orders '
+      '(test 15)', () {
+    // done BEFORE the deadline → Done wins and cancels the timer; advancing
+    // the clock past the deadline emits nothing more.
+    fakeAsync((async) {
+      final run = start(responseIdleTimeout: idle);
+      async.flushMicrotasks();
+      async.elapse(const Duration(seconds: 30));
+      run.connection.serverEvents.add(responseDoneCompleted());
+      async.flushMicrotasks();
+      expect(run.collector.events.single, isA<DoneEvent>());
+      async.elapse(idle); // past the original deadline
+      expect(run.collector.events.single, isA<DoneEvent>());
+    });
+    // timeout wins → exactly one ErrorEvent, and it stays the only terminal as
+    // the clock keeps advancing (a would-be-late done can no longer be
+    // delivered — the subscription is cancelled and the stream closed).
+    fakeAsync((async) {
+      final run = start(responseIdleTimeout: idle);
+      async.flushMicrotasks();
+      async.elapse(idle);
+      async.flushMicrotasks();
+      expect(run.collector.events.single, isA<ErrorEvent>());
+      expect(
+        (run.collector.events.single as ErrorEvent).detail,
+        'response-idle-timeout',
+      );
+      async.elapse(const Duration(minutes: 10));
+      expect(run.collector.events, hasLength(1));
+    });
+  });
+
+  test('a timeout after partial deltas keeps the already-emitted deltas and '
+      'ends with one ErrorEvent (test 16)', () {
+    fakeAsync((async) {
+      final run = start(responseIdleTimeout: idle);
+      async.flushMicrotasks();
+      run.connection.serverEvents
+        ..add(responseCreated())
+        ..add(textDelta('Hel'))
+        ..add(textDelta('lo'));
+      async.flushMicrotasks();
+      async.elapse(idle); // 60s after the last delta reset
+      final events = run.collector.events;
+      expect(events.whereType<Delta>().map((d) => d.text), ['Hel', 'lo']);
+      expect(events.last, isA<ErrorEvent>());
+      expect((events.last as ErrorEvent).detail, 'response-idle-timeout');
+      expect(events.whereType<ErrorEvent>(), hasLength(1));
+    });
+  });
+
+  test(
+    'a response.done also tears down exactly once (teardown regression)',
+    () {
+      fakeAsync((async) {
+        final run = start(responseIdleTimeout: idle);
+        async.flushMicrotasks();
+        run.connection.serverEvents.add(responseCreated());
+        run.connection.serverEvents.add(responseDoneCompleted());
+        async.flushMicrotasks();
+        expect(run.collector.events.last, isA<DoneEvent>());
+        expect(run.collector.done, isTrue);
+        expect(run.connection.closeCalls, 1);
+      });
+    },
+  );
 }
