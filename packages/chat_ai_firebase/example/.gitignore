@@ -48,6 +48,8 @@ app.*.map.json
 # Project-specific values; never commit.
 /firebase.android.local.json
 /firebase.ios.local.json
+/smoke.firebase.ios.local.json
+/smoke.realtime.ios.local.json
 # Defensive: native Firebase config files are NOT the primary path here, but if
 # a contributor adds them they must never be committed either.
 **/GoogleService-Info.plist

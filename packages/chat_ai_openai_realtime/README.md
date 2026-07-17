@@ -69,4 +69,8 @@ final session = ChatSession(backend: backend, botProfile: profile);
 - **Unit tests do not prove the maximum image payload over a real mobile
   RTCDataChannel** — they run against a fake transport.
 - **A physical-device smoke test (iOS/Android against real OpenAI) is
-  required before production use.**
+  required before production use.** The shared iOS smoke harness lives at
+  [`../chat_ai_firebase/example/`](../chat_ai_firebase/example/README.md)
+  (`SMOKE_BACKEND=realtime`). Status: the physical smoke of this adapter has
+  **not been performed yet** — until it passes on a real device, this
+  package is not release-ready.

@@ -3,19 +3,27 @@ import 'dart:typed_data';
 
 import 'package:chat_ai/chat_ai.dart';
 import 'package:chat_ai_firebase/chat_ai_firebase.dart';
+import 'package:chat_ai_openai_realtime/chat_ai_openai_realtime.dart';
 import 'package:firebase_app_check/firebase_app_check.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 
+import 'smoke_client_secret_provider.dart';
+
 // Config-free reusable harness: everything is injected via compile-time defines,
 // so no google-services.json / GoogleService-Info.plist is bundled. Provide them
-// with `--dart-define-from-file=firebase.<platform>.local.json` (see README).
-// The OpenAI key never touches the device — it lives only in the server's Secret
-// Manager. FIREBASE_API_KEY is a Firebase *client* config value, not a provider
+// with `--dart-define-from-file=smoke.<backend>.ios.local.json` (see README).
+// No provider key ever touches the device — the Firebase mode talks to the
+// deployed proxy, the Realtime mode holds only short-lived ephemeral client
+// secrets. FIREBASE_API_KEY is a Firebase *client* config value, not a provider
 // secret, but is still kept only in local, gitignored files.
+const String kSmokeBackend = String.fromEnvironment('SMOKE_BACKEND');
 const String kEndpoint = String.fromEnvironment('CHAT_ENDPOINT');
+const String kRealtimeClientSecretEndpoint = String.fromEnvironment(
+  'REALTIME_CLIENT_SECRET_ENDPOINT',
+);
 const String kBotId = String.fromEnvironment('CHAT_BOT_ID');
 const String kFirebaseApiKey = String.fromEnvironment('FIREBASE_API_KEY');
 const String kFirebaseAppId = String.fromEnvironment('FIREBASE_APP_ID');
@@ -24,22 +32,67 @@ const String kFirebaseMessagingSenderId = String.fromEnvironment(
 );
 const String kFirebaseProjectId = String.fromEnvironment('FIREBASE_PROJECT_ID');
 
-/// The six mandatory defines, in a fixed order. Values are intentionally not
-/// surfaced anywhere — only names are ever shown.
-const Map<String, String> _requiredDefines = {
-  'CHAT_ENDPOINT': kEndpoint,
+/// The two mutually exclusive smoke modes. One launch tests exactly one
+/// backend — there is no runtime switching inside a live [ChatSession] and
+/// no default mode, so an accidental double billable call is impossible.
+enum SmokeBackendMode { firebase, realtime }
+
+/// Parses the raw `SMOKE_BACKEND` define. Anything but the two exact mode
+/// names — empty included — is null: the setup screen, never a session.
+SmokeBackendMode? parseSmokeBackendMode(String raw) => switch (raw) {
+  'firebase' => SmokeBackendMode.firebase,
+  'realtime' => SmokeBackendMode.realtime,
+  _ => null,
+};
+
+/// All smoke defines by name. Values are intentionally not surfaced
+/// anywhere — only names are ever shown.
+const Map<String, String> _defines = {
+  'SMOKE_BACKEND': kSmokeBackend,
   'CHAT_BOT_ID': kBotId,
   'FIREBASE_API_KEY': kFirebaseApiKey,
   'FIREBASE_APP_ID': kFirebaseAppId,
   'FIREBASE_MESSAGING_SENDER_ID': kFirebaseMessagingSenderId,
   'FIREBASE_PROJECT_ID': kFirebaseProjectId,
+  'CHAT_ENDPOINT': kEndpoint,
+  'REALTIME_CLIENT_SECRET_ENDPOINT': kRealtimeClientSecretEndpoint,
 };
 
-/// Names (never values) of the missing required defines.
-List<String> missingDefines() => _requiredDefines.entries
-    .where((entry) => entry.value.isEmpty)
-    .map((entry) => entry.key)
-    .toList(growable: false);
+/// Names (never values) of the missing or invalid defines for one launch:
+/// the mode itself, the mode-independent six, plus the one mode-specific
+/// endpoint — `CHAT_ENDPOINT` only for `firebase`,
+/// `REALTIME_CLIENT_SECRET_ENDPOINT` only for `realtime`. A missing, empty
+/// or unknown `SMOKE_BACKEND` is itself a problem (no default backend).
+List<String> smokeConfigProblems(Map<String, String> defines) {
+  final problems = <String>[];
+  final mode = parseSmokeBackendMode(defines['SMOKE_BACKEND'] ?? '');
+  if (mode == null) {
+    problems.add('SMOKE_BACKEND');
+  }
+  for (final name in const [
+    'CHAT_BOT_ID',
+    'FIREBASE_API_KEY',
+    'FIREBASE_APP_ID',
+    'FIREBASE_MESSAGING_SENDER_ID',
+    'FIREBASE_PROJECT_ID',
+  ]) {
+    if ((defines[name] ?? '').isEmpty) {
+      problems.add(name);
+    }
+  }
+  if (mode == SmokeBackendMode.firebase &&
+      (defines['CHAT_ENDPOINT'] ?? '').isEmpty) {
+    problems.add('CHAT_ENDPOINT');
+  }
+  if (mode == SmokeBackendMode.realtime &&
+      (defines['REALTIME_CLIENT_SECRET_ENDPOINT'] ?? '').isEmpty) {
+    problems.add('REALTIME_CLIENT_SECRET_ENDPOINT');
+  }
+  return problems;
+}
+
+/// Names (never values) of the missing/invalid defines of this launch.
+List<String> missingDefines() => smokeConfigProblems(_defines);
 
 /// Pure helper (not a package API, not exported) mapping the four Firebase
 /// client-config defines into [FirebaseOptions]; rejects any empty value.
@@ -164,7 +217,19 @@ class SmokeHome extends StatefulWidget {
 }
 
 class _SmokeHomeState extends State<SmokeHome> {
-  late final FirebaseChatBackend _backend = FirebaseChatBackend(kEndpoint);
+  // main() only runs SmokeApp with a valid SMOKE_BACKEND; each launch binds
+  // exactly one backend. The Realtime mode reuses the same ChatSession,
+  // widgets, tools and failure mapping — only the transport differs.
+  late final ChatBackend _backend = switch (parseSmokeBackendMode(
+    kSmokeBackend,
+  )) {
+    SmokeBackendMode.realtime => OpenAIRealtimeChatBackend(
+      clientSecretProvider: SmokeClientSecretProvider(
+        endpoint: Uri.parse(kRealtimeClientSecretEndpoint),
+      ),
+    ),
+    _ => FirebaseChatBackend(kEndpoint),
+  };
   late final ChatSession _session = ChatSession(
     backend: _backend,
     botProfile: BotProfile(
@@ -230,7 +295,12 @@ class _SmokeHomeState extends State<SmokeHome> {
   Widget build(BuildContext context) {
     final usage = _usageLine(_state);
     return Scaffold(
-      appBar: AppBar(title: Text('chat_ai smoke — ${_describeState(_state)}')),
+      // The active mode rides in the title: `firebase` or `realtime`.
+      appBar: AppBar(
+        title: Text(
+          'chat_ai smoke [$kSmokeBackend] — ${_describeState(_state)}',
+        ),
+      ),
       body: Column(
         children: [
           Padding(
@@ -312,8 +382,8 @@ class SetupScreen extends StatelessWidget {
             ),
             const SizedBox(height: 12),
             const SelectableText(
-              'flutter run --dart-define-from-file=firebase.android.local.json\n'
-              'flutter run --dart-define-from-file=firebase.ios.local.json',
+              'flutter run --dart-define-from-file=smoke.firebase.ios.local.json\n'
+              'flutter run --dart-define-from-file=smoke.realtime.ios.local.json',
             ),
             const SizedBox(height: 16),
             if (missing.isNotEmpty) ...[

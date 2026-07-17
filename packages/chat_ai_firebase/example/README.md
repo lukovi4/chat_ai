@@ -2,57 +2,95 @@
 
 A minimal **physical-device smoke** for the `chat_ai` package: it drives the
 **real** package widgets (`ChatMessageList`, `ChatInputBar`) and Core
-(`ChatSession` + `FirebaseChatBackend`) against the **deployed OpenAI-only v1 smoke
-endpoint**. It is **not** a production sample app — no router, no state
-framework, no persistence, no analytics, no fake mode, no direct OpenAI call.
+(`ChatSession`) against a live backend. It is **not** a production sample
+app — no router, no state framework, no persistence, no analytics, no fake
+mode.
 
-The OpenAI key is **never on the device**: it lives only in the server's Secret
-Manager. This harness only holds a Firebase id-token + App Check token.
+One and the same UI runs in **two mutually exclusive backend modes**, chosen
+at compile time by the `SMOKE_BACKEND` define:
+
+| `SMOKE_BACKEND` | Transport under test | Wire |
+|---|---|---|
+| `firebase` | `FirebaseChatBackend` (`chat_ai_firebase`) | deployed proxy endpoint (HTTP + SSE) |
+| `realtime` | `OpenAIRealtimeChatBackend` (`chat_ai_openai_realtime`) | direct WebRTC to OpenAI with app-minted ephemeral client secrets |
+
+One launch tests exactly one backend: there is **no runtime switching** inside
+a live session and **no default mode** — a missing or unknown `SMOKE_BACKEND`
+shows the setup screen and never opens a session. The active mode is shown in
+the app bar.
+
+No provider key is ever on the device. The Firebase mode holds a Firebase
+id-token + App Check token; the Realtime mode additionally holds only
+short-lived ephemeral client secrets minted by the app's own endpoint.
 
 ## Prerequisites
 
-- A deployed smoke `chat` function (see
+- Both modes: the smoke Firebase project with **Anonymous** Auth and
+  **App Check** enabled.
+- `firebase` mode: a deployed smoke `chat` function (see
   `../server/firebase-chat-template/DEPLOY_SMOKE.md`).
-- The smoke Firebase project with **Anonymous** Auth and **App Check** enabled.
+- `realtime` mode: a deployed **client-secret mint endpoint** (external smoke
+  infrastructure — deliberately not part of this repository). It must verify
+  Firebase Auth + App Check, check entitlement/limits, call OpenAI
+  `POST /v1/realtime/client_secrets` with the server-side standard API key
+  for **`gpt-realtime-2.1`**, return the official response (top-level
+  `value`), and never receive or log user content.
+
+### Realtime mint contract (exact)
+
+The in-app provider sends exactly this — nothing else ever rides along
+(no prompt, messages, images, tools, conversation state, `ChatRequest`,
+idempotency key or OpenAI API key):
+
+```http
+POST <REALTIME_CLIENT_SECRET_ENDPOINT>
+Authorization: Bearer <Firebase ID token>
+X-Firebase-AppCheck: <App Check token>
+Content-Type: application/json
+
+{"botId":"<opaque bot id>"}
+```
+
+Accepted reply: HTTP `200` with a JSON object whose non-empty top-level
+string `value` is the ephemeral client secret (the official
+`client_secrets` passthrough shape). Anything else — non-200, malformed
+JSON, a missing/empty `value` — fails the leg with a stable sanitized error;
+the provider performs exactly one request per call and never retries.
 
 ## Fixed identifiers
 
-- iOS bundle id / Android application id: **`com.chataismoke.example`** (register
-  both in the smoke Firebase project).
+- iOS bundle id / Android application id: **`com.chataismoke.example`**
+  (register both in the smoke Firebase project).
 - iOS deployment target: **18.0**. Android `minSdk`: **34**.
+- The dual-backend smoke scenario below is **iOS-only**; Android files stay
+  in the harness but are not part of this scenario.
 
 ## Configuration — compile-time defines only (config-free)
 
-This harness bundles **no** `google-services.json` / `GoogleService-Info.plist`
-and no `firebase_options.dart`. Everything is injected via six compile-time
-defines, so the same build is reusable for any smoke project:
+This harness bundles **no** `google-services.json` /
+`GoogleService-Info.plist` and no `firebase_options.dart`. Everything is
+injected via compile-time defines.
 
-`CHAT_ENDPOINT`, `CHAT_BOT_ID`, `FIREBASE_API_KEY`, `FIREBASE_APP_ID`,
-`FIREBASE_MESSAGING_SENDER_ID`, `FIREBASE_PROJECT_ID`.
+Required in **both** modes: `SMOKE_BACKEND`, `CHAT_BOT_ID`,
+`FIREBASE_API_KEY`, `FIREBASE_APP_ID`, `FIREBASE_MESSAGING_SENDER_ID`,
+`FIREBASE_PROJECT_ID` (the Realtime mode also authenticates with Firebase to
+call the mint endpoint).
 
-Put them in a **local, gitignored** file per platform. `FIREBASE_API_KEY` is a
-Firebase *client* config value (not the provider secret), but is still kept only
-in these local files.
+Additionally required per mode:
 
-`firebase.android.local.json` (placeholder — fill with your smoke project's
-Android app values):
+- `firebase` → `CHAT_ENDPOINT`;
+- `realtime` → `REALTIME_CLIENT_SECRET_ENDPOINT`.
 
-```json
-{
-  "CHAT_ENDPOINT": "https://<function-region>-<project-id>.cloudfunctions.net/chat",
-  "CHAT_BOT_ID": "<your-CHAT_BOT_ID>",
-  "FIREBASE_API_KEY": "<android-firebase-api-key>",
-  "FIREBASE_APP_ID": "<android-firebase-app-id>",
-  "FIREBASE_MESSAGING_SENDER_ID": "<messaging-sender-id>",
-  "FIREBASE_PROJECT_ID": "<project-id>"
-}
-```
+Put them in **local, gitignored** files, one per mode. `FIREBASE_API_KEY` is
+a Firebase *client* config value (not the provider secret), but is still kept
+only in these local files.
 
-`firebase.ios.local.json` (placeholder — fill with your smoke project's iOS app
-values):
+`smoke.firebase.ios.local.json` (placeholder — fill with your smoke project's
+iOS app values):
 
 ```json
 {
+  "SMOKE_BACKEND": "firebase",
   "CHAT_ENDPOINT": "https://<function-region>-<project-id>.cloudfunctions.net/chat",
   "CHAT_BOT_ID": "<your-CHAT_BOT_ID>",
   "FIREBASE_API_KEY": "<ios-firebase-api-key>",
@@ -62,58 +100,97 @@ values):
 }
 ```
 
-Both files are gitignored. `CHAT_BOT_ID` must equal the server's `CHAT_BOT_ID`
-parameter.
+`smoke.realtime.ios.local.json` (placeholder):
 
-## Run (physical device)
-
+```json
+{
+  "SMOKE_BACKEND": "realtime",
+  "REALTIME_CLIENT_SECRET_ENDPOINT": "https://<your-mint-endpoint>",
+  "CHAT_BOT_ID": "<your-CHAT_BOT_ID>",
+  "FIREBASE_API_KEY": "<ios-firebase-api-key>",
+  "FIREBASE_APP_ID": "<ios-firebase-app-id>",
+  "FIREBASE_MESSAGING_SENDER_ID": "<messaging-sender-id>",
+  "FIREBASE_PROJECT_ID": "<project-id>"
+}
 ```
-# Android
+
+Both files are gitignored. `CHAT_BOT_ID` must equal the server-side bot/tier
+id. Never commit real values.
+
+## Run (physical iPhone)
+
+```sh
+flutter run --dart-define-from-file=smoke.firebase.ios.local.json
+flutter run --dart-define-from-file=smoke.realtime.ios.local.json
+```
+
+If any required define is missing (or `SMOKE_BACKEND` is empty/unknown), the
+app shows a **setup screen** listing the missing define **names** (never
+their values) and never opens a live session.
+
+## Android — Firebase mode only (legacy path)
+
+The pre-dual-backend Firebase-only Android smoke path is kept:
+`firebase.android.local.json` holds the smoke project's **Android** app
+values (same keys as the iOS firebase config) and must now also include
+`"SMOKE_BACKEND": "firebase"`.
+
+```sh
 flutter run --dart-define-from-file=firebase.android.local.json
-
-# iOS
-flutter run --dart-define-from-file=firebase.ios.local.json
 ```
 
-If any required define is missing, the app shows a **setup screen** listing the
-missing define **names** (never their values) and never opens a live session.
+Android was **not** verified in the current increment and is **not** a
+release gate for the current iOS release. There is no Realtime Android
+configuration.
 
 ## App Check debug token
 
 On first launch the App Check **debug provider** prints a debug token to the
-device log. Register it in the Firebase console (App Check → your app → Manage
-debug tokens). Debug attestation is for the smoke only, never production.
+device log. Register it in the Firebase console (App Check → your app →
+Manage debug tokens). Debug attestation is for the smoke only, never
+production.
 
-## Manual smoke scenarios
+## Manual smoke scenarios (run per mode, iOS)
 
-Run each against the live endpoint and record the result (form below):
+Run each against the live backend and record the result (form below),
+separately for `firebase` and `realtime`:
 
-1. **Streaming** — send a Unicode prompt; the reply streams incrementally, then
-   `Done` with a usage line.
+1. **Streaming** — send a Unicode prompt; the reply streams incrementally,
+   then `Done` with a usage line.
 2. **Image** — attach an image (📎), send a prompt about it, get a reply.
-3. **Cancel** — send, then stop mid-stream: state becomes `Cancelled`, the
+3. **Tool loop** — ask "what time is it?"; the bot calls `get_device_time`,
+   the app returns the ISO-8601 timestamp, and the reply finishes with `Done`.
+4. **Cancel** — send, then stop mid-stream: state becomes `Cancelled`, the
    partial is kept, and late tokens never mutate the UI.
-4. **Resend** — after a failed last user message, resend it.
-5. **Regenerate** — regenerate an interrupted (or empty complete) assistant reply.
-6. **Tool loop** — ask "what time is it?"; the bot calls `get_device_time`, the
-   app returns the ISO-8601 timestamp, and the reply finishes with `Done`.
-7. **No leakage** — check the server logs (`firebase functions:log --only chat`):
-   no payload, key or token appears.
+5. **Done** — a normal completion lands on `Done`.
+6. **Failure mapping** — break the endpoint/network: the failure shows as the
+   existing localized `FailureCause` text, never a technical detail.
+
+`firebase` mode additionally:
+
+7. **No leakage** — check the server logs
+   (`firebase functions:log --only chat`): no payload, key or token appears.
+
+`realtime` mode additionally:
+
+8. **Mint privacy** — the mint endpoint received only Auth/App Check headers
+   and `{"botId": …}`; its logs contain no prompt/messages/images/tools,
+   no Firebase token and no client secret.
+9. **Direct path** — user content flows from the phone straight to OpenAI
+   over WebRTC (the app backend sees none of it).
+10. **Single dispatch** — one send leg emits exactly one `response.create`.
+    Note: the physical smoke is NOT the proof of the ambiguous-failure
+    money-safe boundary — that guarantee stays pinned by the Realtime
+    adapter's automated tests.
 
 ## Result log
 
-| Date (UTC) | Device / OS | App build | Function revision | Scenario | Pass/Fail | Notes |
+| Date (UTC) | Device / OS | App build | Mode | Scenario | Pass/Fail | Notes |
 |---|---|---|---|---|---|---|
-|  |  |  |  | 1 streaming |  |  |
-|  |  |  |  | 2 image |  |  |
-|  |  |  |  | 3 cancel |  |  |
-|  |  |  |  | 4 resend |  |  |
-|  |  |  |  | 5 regenerate |  |  |
-|  |  |  |  | 6 tool loop |  |  |
-|  |  |  |  | 7 no leakage |  |  |
+|  |  |  |  |  |  |  |
 
 ## Build without a config
 
-`flutter build apk --debug` and `flutter build ios --simulator --no-codesign`
-build without any local Firebase config: with no defines the runtime shows the
-setup screen. Never commit real values or native config files.
+`flutter build ios --no-codesign` builds without any local config: with no
+defines the runtime shows the setup screen. Never commit real values or
+native config files.

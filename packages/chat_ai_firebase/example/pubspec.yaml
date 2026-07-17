@@ -10,12 +10,16 @@ dependencies:
   flutter:
     sdk: flutter
 
-  # The packages under test — the real widgets/Core and the Firebase
-  # transport adapter, never a fork.
+  # The packages under test — the real widgets/Core and the two transport
+  # adapters, never a fork. The Realtime adapter is a TEST-HARNESS-ONLY
+  # dependency of this example (SMOKE_BACKEND=realtime); the three
+  # production packages keep their dependency isolation.
   chat_ai:
     path: ../../..
   chat_ai_firebase:
     path: ../
+  chat_ai_openai_realtime:
+    path: ../../chat_ai_openai_realtime
 
   # Firebase attestation for the live smoke path (no provider key on device).
   firebase_core: ^4.12.1
