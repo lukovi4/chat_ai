@@ -1,0 +1,40 @@
+name: chat_ai_openai_realtime_voice
+description: >-
+  Optional speech-to-speech voice session for chat_ai: one direct device →
+  OpenAI Realtime WebRTC call, ephemeral client secrets minted by the app,
+  server-side semantic VAD, one microphone track and one remote assistant
+  audio track. NOT a ChatBackend and it does not use ChatSession. Private git
+  dependency, not published.
+version: 0.1.0
+publish_to: none
+
+environment:
+  sdk: ^3.12.0
+  flutter: ">=3.44.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # The core contracts this package reuses (BotProfile, Tool). The core
+  # package at the root of this same repository, path-resolved. This package
+  # implements NO ChatBackend and uses NO ChatSession.
+  chat_ai:
+    path: ../..
+
+  # The already-approved ClientSecretProvider contract — the app mints one
+  # ephemeral OpenAI Realtime client secret; the standard API key never lands
+  # on the device. Reused verbatim; this package does not redefine it.
+  chat_ai_openai_realtime:
+    path: ../chat_ai_openai_realtime
+
+  # The device WebRTC transport (peer connection + oai-events data channel +
+  # one audio-only local track). Pinned EXACTLY to 1.5.2 — the same public API
+  # the accepted iOS feasibility probe was physically verified against. No
+  # Firebase, no Dio, no Record_transcribe, no codegen/Freezed.
+  flutter_webrtc: 1.5.2
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
