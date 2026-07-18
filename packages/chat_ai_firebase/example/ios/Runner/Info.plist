@@ -6,6 +6,8 @@
 	<true/>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>Choose an image to attach to your chat message.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>The voice feasibility probe records one short spoken reply.</string>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
 	<key>CFBundleDisplayName</key>

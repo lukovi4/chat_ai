@@ -29,6 +29,14 @@ dependencies:
   # Image attachment via the Core's OnAttach.
   image_picker: ^1.2.3
 
+  # Increment-0 iOS voice feasibility spike ONLY (lib/voice_probe_main.dart):
+  # the WebRTC peer connection + oai-events data channel + one audio-only
+  # local track. Pinned EXACTLY to 1.5.2 — the app-local native audio writer
+  # uses the public FlutterWebRTCPlugin / LocalAudioTrack headers and the
+  # WebRTC-SDK RTCAudioRenderer / RTCAudioTrack headers. Not used by the
+  # production packages.
+  flutter_webrtc: 1.5.2
+
   cupertino_icons: ^1.0.8
 
 dev_dependencies:

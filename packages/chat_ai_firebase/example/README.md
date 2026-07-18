@@ -190,6 +190,33 @@ separately for `firebase` and `realtime`:
 |---|---|---|---|---|---|---|
 |  |  |  |  |  |  |  |
 
+## Voice feasibility probe (Increment-0, iOS only)
+
+A **separate entrypoint** — `lib/voice_probe_main.dart` — proves ONE
+speech-to-speech WebRTC turn device → OpenAI Realtime, saving the user reply
+and the assistant reply as two locally-playable audio files. It is a
+**feasibility spike**, not a production voice API and not part of any package.
+
+```
+flutter run \
+  -t lib/voice_probe_main.dart \
+  --dart-define-from-file=smoke.realtime.ios.local.json
+```
+
+It reuses this harness's Firebase init and `SmokeClientSecretProvider`
+(`REALTIME_CLIENT_SECRET_ENDPOINT`, `CHAT_BOT_ID`, `FIREBASE_*` defines; no
+`SMOKE_BACKEND`). One microphone owner (`flutter_webrtc`), no camera, no video,
+no second recorder. The two files are written **entirely on the iOS side** by
+an app-local native writer that attaches to the existing WebRTC audio tracks as
+a public `RTCAudioRenderer` (`addRenderer:` / `removeRenderer:`) — **no PCM/audio
+bytes ever cross the Flutter channel**.
+
+Flow: **Start** (one client-secret mint) → speak one short phrase → hear one
+assistant response → **Stop/Close** → **Play user** / **Play assistant**. The
+UI shows only coarse state; it never shows a path, transcript, secret or raw
+event. Money-safe: one mint, one server-VAD response, no retry/reconnect, no
+extra `response.create`.
+
 ## Build without a config
 
 `flutter build ios --no-codesign` builds without any local config: with no
