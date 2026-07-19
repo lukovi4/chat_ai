@@ -3,10 +3,16 @@
 // enforces one-mint / one-signaling-POST / no-retry / no-reconnect /
 // exactly-once teardown. It is NOT a ChatBackend and does not use ChatSession.
 //
-// Nothing sensitive is ever surfaced: [state] carries only a coarse [phase]
-// and an optional coarse [failure]. The ephemeral secret, SDP, Authorization,
-// system prompt, audio, raw Realtime events, response bodies, track ids and
-// provider messages never reach state, logs or exceptions.
+// [state] carries only a coarse [phase] and an optional coarse [failure]. The
+// ephemeral secret, SDP, Authorization, system prompt, audio, raw Realtime
+// events, response bodies, provider errors, IDs, usage and track ids never
+// reach state, logs or exceptions.
+//
+// The one deliberate exception is the OPTIONAL [transcripts] stream: when the
+// app sets `transcriptsEnabled`, the session emits ONLY the final user and
+// assistant transcript TEXT (never deltas, ids, usage or a failure), carried
+// straight from the same direct device → OpenAI Realtime session. The package
+// still never logs or stores that text.
 //
 // One instance == one WebRTC session:
 // - start() is allowed exactly once (a repeat is a programming error);
@@ -32,6 +38,7 @@ import 'package:flutter/foundation.dart';
 import 'voice_cancellation.dart';
 import 'voice_session_update.dart';
 import 'voice_state.dart';
+import 'voice_transcript.dart';
 import 'voice_transport.dart';
 
 /// Builds one fresh transport for the single Start (nothing is pooled).
@@ -62,6 +69,8 @@ class OpenAIRealtimeVoiceSession {
     String voice = 'marin',
     int maxOutputTokens = 4096,
     Duration responseIdleTimeout = const Duration(seconds: 60),
+    bool transcriptsEnabled = false,
+    String inputTranscriptionModel = 'gpt-4o-mini-transcribe',
   }) : this._(
          clientSecretProvider: clientSecretProvider,
          botProfile: botProfile,
@@ -70,6 +79,8 @@ class OpenAIRealtimeVoiceSession {
          voice: voice,
          maxOutputTokens: maxOutputTokens,
          responseIdleTimeout: responseIdleTimeout,
+         transcriptsEnabled: transcriptsEnabled,
+         inputTranscriptionModel: inputTranscriptionModel,
          transportFactory: _defaultTransportFactory,
          timerFactory: _defaultWatchdogTimer,
        );
@@ -82,6 +93,8 @@ class OpenAIRealtimeVoiceSession {
     required String voice,
     required int maxOutputTokens,
     required Duration responseIdleTimeout,
+    required bool transcriptsEnabled,
+    required String inputTranscriptionModel,
     required RealtimeVoiceTransportFactory transportFactory,
     required VoiceWatchdogTimerFactory timerFactory,
   }) : _provider = clientSecretProvider,
@@ -91,6 +104,8 @@ class OpenAIRealtimeVoiceSession {
        _voice = voice,
        _maxOutputTokens = maxOutputTokens,
        _responseIdleTimeout = responseIdleTimeout,
+       _transcriptsEnabled = transcriptsEnabled,
+       _inputTranscriptionModel = inputTranscriptionModel,
        _transportFactory = transportFactory,
        _timerFactory = timerFactory {
     _validate();
@@ -103,12 +118,20 @@ class OpenAIRealtimeVoiceSession {
   final String _voice;
   final int _maxOutputTokens;
   final Duration _responseIdleTimeout;
+  final bool _transcriptsEnabled;
+  final String _inputTranscriptionModel;
   final RealtimeVoiceTransportFactory _transportFactory;
   final VoiceWatchdogTimerFactory _timerFactory;
 
   final StreamController<OpenAIRealtimeVoiceState> _states =
       StreamController<OpenAIRealtimeVoiceState>.broadcast();
   OpenAIRealtimeVoiceState _state = const OpenAIRealtimeVoiceState.idle();
+
+  // The optional final-transcript side channel. In-memory only, no history; it
+  // exists at all only when the app opted in. Closed in dispose() alongside
+  // [_states]; a terminal teardown forbids any further transcript event.
+  final StreamController<OpenAIRealtimeVoiceTranscript> _transcripts =
+      StreamController<OpenAIRealtimeVoiceTranscript>.broadcast();
 
   // Lifecycle guards.
   bool _startCalled = false; // start() is allowed exactly once.
@@ -142,6 +165,29 @@ class OpenAIRealtimeVoiceSession {
   bool _responseCancelSent = false;
   Timer? _watchdog;
 
+  // ---- Optional transcript attribution (only when _transcriptsEnabled) -----
+  // Minimal in-memory bookkeeping so a final transcript can be attributed to a
+  // reply/response THIS session already saw, and never emitted twice. No IDs
+  // ever leave the package.
+  //
+  // User item ids seen via a valid input_audio_buffer.speech_stopped.
+  final Set<String> _knownUserItemIds = <String>{};
+  // User item ids whose transcription reached a terminal outcome
+  // (completed OR failed) — guards duplicate/terminal re-emission.
+  final Set<String> _resolvedUserItemIds = <String>{};
+  // Response ids seen via a valid response.created (kept even after a barge-in
+  // abandons the active response, so the spoken part's transcript may still
+  // emit — see §3.3).
+  final Set<String> _knownResponseIds = <String>{};
+  // Identity keys of assistant transcripts already emitted (duplicate guard).
+  final Set<String> _emittedAssistantKeys = <String>{};
+  // singleTurn only: the first allowed user reply's item id, and whether its
+  // async transcription terminal outcome (completed/failed) — or the idle
+  // timeout upper bound — has been reached. singleTurn will not close the
+  // transport until this is resolved.
+  String? _pendingUserItemId;
+  bool _userTranscriptResolved = false;
+
   void _validate() {
     if (_model.trim().isEmpty) {
       throw ArgumentError.value(_model, 'model', 'must not be empty');
@@ -172,10 +218,26 @@ class OpenAIRealtimeVoiceSession {
         'tools are not supported by this increment; construct without tools',
       );
     }
+    if (_transcriptsEnabled && _inputTranscriptionModel.trim().isEmpty) {
+      // An empty transcription model is rejected synchronously, BEFORE any
+      // mint/network — never sent to the provider.
+      throw ArgumentError.value(
+        _inputTranscriptionModel,
+        'inputTranscriptionModel',
+        'must not be empty when transcriptsEnabled is true',
+      );
+    }
   }
 
   OpenAIRealtimeVoiceState get state => _state;
   Stream<OpenAIRealtimeVoiceState> get states => _states.stream;
+
+  /// A broadcast stream of the OPTIONAL final transcripts, in the order the
+  /// live session delivered them. Emits nothing unless `transcriptsEnabled` was
+  /// set at construction. It carries only successfully-received FINAL text —
+  /// user and assistant — and never deltas, ids, usage or a failure. Closed by
+  /// [dispose].
+  Stream<OpenAIRealtimeVoiceTranscript> get transcripts => _transcripts.stream;
 
   void _emit(OpenAIRealtimeVoiceState next) {
     _state = next;
@@ -289,7 +351,7 @@ class OpenAIRealtimeVoiceSession {
       case 'input_audio_buffer.speech_started':
         _onSpeechStarted();
       case 'input_audio_buffer.speech_stopped':
-        _onSpeechStopped();
+        _onSpeechStopped(event);
       case 'response.created':
         _onResponseCreated(event);
       case 'output_audio_buffer.started':
@@ -298,6 +360,12 @@ class OpenAIRealtimeVoiceSession {
         _onOutputAudioStopped(event);
       case 'response.done':
         _onResponseDone(event);
+      case 'conversation.item.input_audio_transcription.completed':
+        _onUserTranscriptCompleted(event);
+      case 'conversation.item.input_audio_transcription.failed':
+        _onUserTranscriptFailed(event);
+      case 'response.output_audio_transcript.done':
+        _onAssistantTranscriptDone(event);
       case 'error':
         await _onErrorEvent();
     }
@@ -320,6 +388,8 @@ class OpenAIRealtimeVoiceSession {
           voice: _voice,
           instructions: _botProfile.systemPrompt,
           maxOutputTokens: _maxOutputTokens,
+          transcriptsEnabled: _transcriptsEnabled,
+          inputTranscriptionModel: _inputTranscriptionModel,
         ),
       );
     } catch (_) {
@@ -372,7 +442,7 @@ class OpenAIRealtimeVoiceSession {
     _setPhase(OpenAIRealtimeVoicePhase.userSpeaking);
   }
 
-  void _onSpeechStopped() {
+  void _onSpeechStopped(Map<String, Object?> event) {
     if (!_active || !_micEnabled) {
       return;
     }
@@ -385,8 +455,29 @@ class OpenAIRealtimeVoiceSession {
       _userTurnClosed = true;
       _transport?.setMicrophoneEnabled(false);
     }
+    _trackUserItem(event);
     // The assistant's response follows (server VAD create_response).
     _setPhase(OpenAIRealtimeVoicePhase.assistantSpeaking);
+  }
+
+  /// Remembers the user reply's item id so a later
+  /// input_audio_transcription.completed/.failed can be attributed to a reply
+  /// THIS session actually saw. No-op unless transcripts are enabled. In
+  /// singleTurn it also latches the first reply as the one whose transcription
+  /// terminal outcome the auto-close waits for.
+  void _trackUserItem(Map<String, Object?> event) {
+    if (!_transcriptsEnabled) {
+      return;
+    }
+    final itemId = _asNonEmptyString(event['item_id']);
+    if (itemId == null) {
+      return;
+    }
+    _knownUserItemIds.add(itemId);
+    if (_mode == OpenAIRealtimeVoiceMode.singleTurn &&
+        _pendingUserItemId == null) {
+      _pendingUserItemId = itemId;
+    }
   }
 
   void _onResponseCreated(Map<String, Object?> event) {
@@ -413,6 +504,10 @@ class OpenAIRealtimeVoiceSession {
     }
     // A fresh response begins: reset per-response flags and arm the watchdog.
     _activeResponseId = id;
+    // Remembered even beyond a later barge-in, so the spoken part's assistant
+    // transcript may still be attributed and emitted (§3.3). IDs never leave
+    // the package.
+    _knownResponseIds.add(id);
     _responseActive = true;
     _responseDone = false;
     _outputAudioStopped = false;
@@ -468,8 +563,21 @@ class OpenAIRealtimeVoiceSession {
   /// singleTurn closes only after BOTH a `completed` response.done AND the
   /// matching output_audio_buffer.stopped (never on response.done alone);
   /// conversation returns to listening and accepts the next VAD turn.
+  ///
+  /// With transcripts enabled the async user transcription is a THIRD singleTurn
+  /// close condition: the auto-close waits for the first reply's transcription
+  /// terminal outcome (completed/failed), bounded above by the existing idle
+  /// timeout seam so a lost/malformed transcript can never hang the turn.
   void _evaluateResponseCompletion() {
     if (!(_responseDone && _outputAudioStopped)) {
+      return;
+    }
+    if (_mode == OpenAIRealtimeVoiceMode.singleTurn &&
+        _awaitingUserTranscript()) {
+      // Audio response finished, but the async user transcript is still
+      // pending. Do NOT close the transport yet; reuse the idle-timeout seam as
+      // the upper bound instead of adding a new timeout/timer.
+      _armUserTranscriptDeadline();
       return;
     }
     _disarmWatchdog();
@@ -483,10 +591,162 @@ class OpenAIRealtimeVoiceSession {
         ),
       );
     } else {
-      // conversation: keep the connection, ready for the next turn.
+      // conversation: keep the connection, ready for the next turn. A pending
+      // user transcript never blocks the next VAD turn or Response.
       _resetResponseState();
       _setPhase(OpenAIRealtimeVoicePhase.listening);
     }
+  }
+
+  /// True while singleTurn still owes a terminal outcome for the first reply's
+  /// transcription. Never true unless transcripts are enabled and a first user
+  /// item was actually observed (so a missing item id can't hang the turn).
+  bool _awaitingUserTranscript() =>
+      _transcriptsEnabled &&
+      _mode == OpenAIRealtimeVoiceMode.singleTurn &&
+      _pendingUserItemId != null &&
+      !_userTranscriptResolved;
+
+  /// Reuses the single watchdog/timer seam as the upper bound for the pending
+  /// user transcript wait. On expiry singleTurn ends normally WITHOUT a
+  /// transcript — no retry, reconnect, mint or new Response.
+  void _armUserTranscriptDeadline() {
+    _watchdog?.cancel();
+    _watchdog = _timerFactory(_responseIdleTimeout, _onUserTranscriptDeadline);
+  }
+
+  void _onUserTranscriptDeadline() {
+    if (!_active) {
+      return;
+    }
+    _userTranscriptResolved = true;
+    _disarmWatchdog();
+    _maybeFinishSingleTurn();
+  }
+
+  /// Marks the singleTurn user-transcript wait satisfied for [itemId] and, if
+  /// the audio response has already finished, closes the one turn.
+  void _resolveUserTranscriptWait(String itemId) {
+    if (_mode != OpenAIRealtimeVoiceMode.singleTurn ||
+        itemId != _pendingUserItemId ||
+        _userTranscriptResolved) {
+      return;
+    }
+    _userTranscriptResolved = true;
+    _maybeFinishSingleTurn();
+  }
+
+  /// The controlled singleTurn auto-close, gated on all three conditions:
+  /// a completed response.done, the matching output_audio_buffer.stopped and
+  /// the user transcription terminal outcome (or its timeout bound).
+  void _maybeFinishSingleTurn() {
+    if (!(_responseDone && _outputAudioStopped) || _teardown != null) {
+      return;
+    }
+    _disarmWatchdog();
+    unawaited(
+      _teardown ??= _terminate(
+        OpenAIRealtimeVoicePhase.ended,
+        failure: null,
+        cancelActiveResponse: false,
+      ),
+    );
+  }
+
+  // ---- Optional final transcripts ----------------------------------------
+
+  /// A valid final USER transcript. Emitted only for an item id THIS session
+  /// saw via speech_stopped, with a non-negative content_index and a String
+  /// transcript (empty allowed), passed through untrimmed. A duplicate/terminal
+  /// re-arrival is ignored. Also resolves the singleTurn wait.
+  void _onUserTranscriptCompleted(Map<String, Object?> event) {
+    if (!_active || !_transcriptsEnabled) {
+      return;
+    }
+    final itemId = _asNonEmptyString(event['item_id']);
+    if (itemId == null ||
+        !_knownUserItemIds.contains(itemId) ||
+        !_isNonNegativeInt(event['content_index'])) {
+      return;
+    }
+    final transcript = event['transcript'];
+    if (transcript is! String) {
+      return;
+    }
+    if (!_resolvedUserItemIds.add(itemId)) {
+      // Already terminal for this reply — never emit twice.
+      return;
+    }
+    _emitTranscript(OpenAIRealtimeVoiceTranscriptRole.user, transcript);
+    _resolveUserTranscriptWait(itemId);
+  }
+
+  /// A user transcription FAILURE for a known reply. A terminal outcome of the
+  /// optional side channel only: emit no transcript, keep the voice session
+  /// running, cancel nothing, retry nothing, and read/store nothing from the
+  /// raw error. Resolves the singleTurn wait like a completed one.
+  ///
+  /// A malformed `.failed` (missing/negative/non-int content_index, or a
+  /// missing/non-Map error) is NOT a terminal outcome — it is ignored entirely,
+  /// so a later valid completed is never suppressed. The error's contents are
+  /// only shape-checked (`is Map`), never read, validated deeper or stored.
+  void _onUserTranscriptFailed(Map<String, Object?> event) {
+    if (!_active || !_transcriptsEnabled) {
+      return;
+    }
+    final itemId = _asNonEmptyString(event['item_id']);
+    if (itemId == null ||
+        !_knownUserItemIds.contains(itemId) ||
+        !_isNonNegativeInt(event['content_index']) ||
+        event['error'] is! Map) {
+      return;
+    }
+    if (!_resolvedUserItemIds.add(itemId)) {
+      return;
+    }
+    _resolveUserTranscriptWait(itemId);
+  }
+
+  /// A valid final ASSISTANT transcript. Emitted for any response id THIS
+  /// session saw via response.created — including one later abandoned by a
+  /// barge-in (§3.3) — with a non-empty item id, non-negative indices and a
+  /// String transcript (empty allowed), passed through untrimmed. A duplicate
+  /// (same response/item/indices) is ignored.
+  void _onAssistantTranscriptDone(Map<String, Object?> event) {
+    if (!_active || !_transcriptsEnabled) {
+      return;
+    }
+    final responseId = _asNonEmptyString(event['response_id']);
+    if (responseId == null || !_knownResponseIds.contains(responseId)) {
+      return;
+    }
+    final itemId = _asNonEmptyString(event['item_id']);
+    if (itemId == null ||
+        !_isNonNegativeInt(event['output_index']) ||
+        !_isNonNegativeInt(event['content_index'])) {
+      return;
+    }
+    final transcript = event['transcript'];
+    if (transcript is! String) {
+      return;
+    }
+    final key =
+        '$responseId|$itemId|${event['output_index']}|${event['content_index']}';
+    if (!_emittedAssistantKeys.add(key)) {
+      // The exact same terminal transcript event — never emit twice.
+      return;
+    }
+    _emitTranscript(OpenAIRealtimeVoiceTranscriptRole.assistant, transcript);
+  }
+
+  /// The one transcript sink. A terminal teardown closes the controller, so a
+  /// late native/data-channel event after teardown can never emit. The text is
+  /// never logged or stored here.
+  void _emitTranscript(OpenAIRealtimeVoiceTranscriptRole role, String text) {
+    if (_transcripts.isClosed) {
+      return;
+    }
+    _transcripts.add(OpenAIRealtimeVoiceTranscript(role: role, text: text));
   }
 
   Future<void> _onErrorEvent() async {
@@ -746,6 +1006,9 @@ class OpenAIRealtimeVoiceSession {
     if (!_states.isClosed) {
       await _states.close();
     }
+    if (!_transcripts.isClosed) {
+      await _transcripts.close();
+    }
   }
 }
 
@@ -764,6 +1027,8 @@ OpenAIRealtimeVoiceSession voiceSessionForTesting({
   String voice = 'marin',
   int maxOutputTokens = 4096,
   Duration responseIdleTimeout = const Duration(seconds: 60),
+  bool transcriptsEnabled = false,
+  String inputTranscriptionModel = 'gpt-4o-mini-transcribe',
   VoiceWatchdogTimerFactory timerFactory = _defaultWatchdogTimer,
 }) => OpenAIRealtimeVoiceSession._(
   clientSecretProvider: clientSecretProvider,
@@ -773,6 +1038,8 @@ OpenAIRealtimeVoiceSession voiceSessionForTesting({
   voice: voice,
   maxOutputTokens: maxOutputTokens,
   responseIdleTimeout: responseIdleTimeout,
+  transcriptsEnabled: transcriptsEnabled,
+  inputTranscriptionModel: inputTranscriptionModel,
   transportFactory: transportFactory,
   timerFactory: timerFactory,
 );

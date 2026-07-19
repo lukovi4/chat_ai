@@ -16,6 +16,8 @@ void main() {
     Duration responseIdleTimeout = const Duration(seconds: 60),
     List<Tool> tools = const <Tool>[],
     FakeClientSecretProvider? provider,
+    bool transcriptsEnabled = false,
+    String inputTranscriptionModel = 'gpt-4o-mini-transcribe',
   }) {
     return OpenAIRealtimeVoiceSession(
       clientSecretProvider: provider ?? FakeClientSecretProvider(),
@@ -24,6 +26,8 @@ void main() {
       voice: voice,
       maxOutputTokens: maxOutputTokens,
       responseIdleTimeout: responseIdleTimeout,
+      transcriptsEnabled: transcriptsEnabled,
+      inputTranscriptionModel: inputTranscriptionModel,
     );
   }
 
@@ -85,5 +89,45 @@ void main() {
     );
     // The rejection happened synchronously, before any mint.
     expect(provider.calls, 0);
+  });
+
+  // Required test 2 (validation half): an empty input transcription model is
+  // rejected synchronously — before the provider/network — but only when
+  // transcripts are enabled.
+  test(
+    'an empty transcription model is rejected before the provider when enabled',
+    () {
+      final provider = FakeClientSecretProvider();
+      for (final bad in <String>['', '   ']) {
+        expect(
+          () => build(
+            provider: provider,
+            transcriptsEnabled: true,
+            inputTranscriptionModel: bad,
+          ),
+          throwsArgumentError,
+          reason: '"$bad"',
+        );
+      }
+      // The rejection happened synchronously, before any mint.
+      expect(provider.calls, 0);
+    },
+  );
+
+  test('transcriptsEnabled true with a non-empty model constructs fine', () {
+    expect(
+      build(transcriptsEnabled: true, inputTranscriptionModel: 'whisper-1'),
+      isA<OpenAIRealtimeVoiceSession>(),
+    );
+    // The default transcription model is also accepted.
+    expect(build(transcriptsEnabled: true), isA<OpenAIRealtimeVoiceSession>());
+  });
+
+  test('an empty transcription model is ignored while transcripts are off', () {
+    // transcriptsEnabled defaults to false, so the model is never validated.
+    expect(
+      build(inputTranscriptionModel: ''),
+      isA<OpenAIRealtimeVoiceSession>(),
+    );
   });
 }

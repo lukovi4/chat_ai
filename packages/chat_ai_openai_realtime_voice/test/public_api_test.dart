@@ -1,7 +1,8 @@
-// Required test 1: the public barrel exports EXACTLY the five approved
-// declarations — no more, no less — and every export is a `show` (nothing
-// leaks). The five are also referenced through the barrel import alone (no
-// `src/` import) to prove they are genuinely public.
+// Required test 1 / 12: the public barrel exports EXACTLY the seven approved
+// declarations — the original five plus the two transcript declarations — no
+// more, no less, and every export is a `show` (nothing leaks). They are also
+// referenced through the barrel import alone (no `src/` import) to prove they
+// are genuinely public.
 import 'dart:io';
 
 import 'package:chat_ai/chat_ai.dart' show BotProfile;
@@ -16,7 +17,7 @@ class _AppSecretProvider implements ClientSecretProvider {
 }
 
 void main() {
-  test('the barrel exports exactly the five approved declarations', () {
+  test('the barrel exports exactly the seven approved declarations', () {
     final source = File(
       'lib/chat_ai_openai_realtime_voice.dart',
     ).readAsStringSync();
@@ -49,6 +50,8 @@ void main() {
       'OpenAIRealtimeVoicePhase',
       'OpenAIRealtimeVoiceState',
       'OpenAIRealtimeVoiceFailure',
+      'OpenAIRealtimeVoiceTranscript',
+      'OpenAIRealtimeVoiceTranscriptRole',
     });
   });
 
@@ -71,7 +74,7 @@ void main() {
     expect(barrel.contains('forTesting'), isFalse);
   });
 
-  test('the five declarations are usable through the barrel import alone', () {
+  test('the seven declarations are usable through the barrel import alone', () {
     // Types resolve.
     const OpenAIRealtimeVoiceMode singleTurn =
         OpenAIRealtimeVoiceMode.singleTurn;
@@ -83,7 +86,20 @@ void main() {
     expect(mint, OpenAIRealtimeVoiceFailure.mint);
     expect(state.phase, OpenAIRealtimeVoicePhase.idle);
 
-    // The session constructs through its public constructor.
+    // The two transcript declarations resolve through the barrel too.
+    const OpenAIRealtimeVoiceTranscriptRole role =
+        OpenAIRealtimeVoiceTranscriptRole.user;
+    const OpenAIRealtimeVoiceTranscript transcript =
+        OpenAIRealtimeVoiceTranscript(
+          role: OpenAIRealtimeVoiceTranscriptRole.assistant,
+          text: 'hi',
+        );
+    expect(role, OpenAIRealtimeVoiceTranscriptRole.user);
+    expect(transcript.role, OpenAIRealtimeVoiceTranscriptRole.assistant);
+    expect(transcript.text, 'hi');
+
+    // The session constructs through its public constructor, including the two
+    // opt-in transcript parameters, and exposes the transcripts stream.
     final session = OpenAIRealtimeVoiceSession(
       clientSecretProvider: _AppSecretProvider(),
       botProfile: const BotProfile(
@@ -91,8 +107,32 @@ void main() {
         systemPrompt: 'be brief',
         tools: <Never>[],
       ),
+      transcriptsEnabled: true,
     );
     expect(session.state, const OpenAIRealtimeVoiceState.idle());
     expect(session.state.phase, OpenAIRealtimeVoicePhase.idle);
+    expect(session.transcripts, isA<Stream<OpenAIRealtimeVoiceTranscript>>());
+    session.dispose();
+  });
+
+  test('the two transcript declarations have value equality', () {
+    const a = OpenAIRealtimeVoiceTranscript(
+      role: OpenAIRealtimeVoiceTranscriptRole.user,
+      text: 'hello',
+    );
+    const b = OpenAIRealtimeVoiceTranscript(
+      role: OpenAIRealtimeVoiceTranscriptRole.user,
+      text: 'hello',
+    );
+    const c = OpenAIRealtimeVoiceTranscript(
+      role: OpenAIRealtimeVoiceTranscriptRole.assistant,
+      text: 'hello',
+    );
+    expect(a, b);
+    expect(a.hashCode, b.hashCode);
+    expect(a == c, isFalse);
+    // toString names the role and the text LENGTH only — never the content.
+    expect(a.toString().contains('hello'), isFalse);
+    expect(a.toString().contains('user'), isTrue);
   });
 }

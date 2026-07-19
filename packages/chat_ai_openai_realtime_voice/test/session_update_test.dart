@@ -64,4 +64,73 @@ void main() {
     final audio = session['audio']! as Map<String, Object?>;
     expect((audio['output']! as Map<String, Object?>)['voice'], 'cedar');
   });
+
+  // Required test 1 (wire half): transcriptsEnabled == false (the default)
+  // leaves the session.update byte-for-byte the original shape — no
+  // `audio.input.transcription` key at all.
+  test(
+    'transcriptsEnabled false leaves the update byte-for-byte unchanged',
+    () {
+      final disabledDefault = build();
+      final disabledExplicit = buildRealtimeVoiceSessionUpdate(
+        model: 'gpt-realtime-2.1',
+        voice: 'marin',
+        instructions: 'be brief',
+        maxOutputTokens: 4096,
+        transcriptsEnabled: false,
+      );
+      // Explicit false and the default are identical, and both match the exact
+      // original structure.
+      expect(disabledExplicit, disabledDefault);
+
+      final input =
+          ((disabledDefault['session']! as Map<String, Object?>)['audio']!
+                  as Map<String, Object?>)['input']!
+              as Map<String, Object?>;
+      expect(input.containsKey('transcription'), isFalse);
+      expect(input.keys.toSet(), <String>{'turn_detection'});
+    },
+  );
+
+  // Required test 2: transcriptsEnabled == true adds EXACTLY
+  // audio.input.transcription.model and nothing else.
+  test('transcriptsEnabled true adds exactly the transcription model', () {
+    final update = buildRealtimeVoiceSessionUpdate(
+      model: 'gpt-realtime-2.1',
+      voice: 'marin',
+      instructions: 'be brief',
+      maxOutputTokens: 4096,
+      transcriptsEnabled: true,
+    );
+    final input =
+        ((update['session']! as Map<String, Object?>)['audio']!
+                as Map<String, Object?>)['input']!
+            as Map<String, Object?>;
+    // turn_detection is untouched; transcription is added alongside it.
+    expect(input.keys.toSet(), <String>{'turn_detection', 'transcription'});
+    final transcription = input['transcription']! as Map<String, Object?>;
+    // The default input transcription model, and NO other key (no language,
+    // prompt, logprobs, include, ...).
+    expect(transcription.keys.toSet(), <String>{'model'});
+    expect(transcription['model'], 'gpt-4o-mini-transcribe');
+  });
+
+  test('a custom input transcription model is passed through unchanged', () {
+    final update = buildRealtimeVoiceSessionUpdate(
+      model: 'gpt-realtime-2.1',
+      voice: 'marin',
+      instructions: 'be brief',
+      maxOutputTokens: 4096,
+      transcriptsEnabled: true,
+      inputTranscriptionModel: 'whisper-1',
+    );
+    final input =
+        ((update['session']! as Map<String, Object?>)['audio']!
+                as Map<String, Object?>)['input']!
+            as Map<String, Object?>;
+    expect(
+      (input['transcription']! as Map<String, Object?>)['model'],
+      'whisper-1',
+    );
+  });
 }
