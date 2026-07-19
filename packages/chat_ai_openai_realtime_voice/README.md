@@ -110,9 +110,16 @@ handled directly inside the device → OpenAI Realtime session; the app's backen
 still receives only the mint request, never audio or a transcript. The package
 never logs or stores a transcript, not even in debug/test.
 
+## Physical smoke status
+
+Physical **iOS** transcript smoke of this package has been **run successfully**:
+both `singleTurn` and `conversation` were exercised on a physical iPhone against
+the production `OpenAIRealtimeVoiceSession`, and the final **user** and
+**assistant** transcripts were confirmed. Physical **Android** transcript smoke
+has **not** been run yet — Android is not claimed as ready.
+
 ## Not in this increment
 
 Audio recording, playback, waveform, transcript deltas/partials/history,
-persistence, tools/function calling and UI are **not** implemented. Physical
-iOS/Android transcript smoke of this package has **not** been run yet. There is
+persistence, tools/function calling and UI are **not** implemented. There is
 no native code in this package.

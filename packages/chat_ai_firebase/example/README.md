@@ -217,6 +217,51 @@ UI shows only coarse state; it never shows a path, transcript, secret or raw
 event. Money-safe: one mint, one server-VAD response, no retry/reconnect, no
 extra `response.create`.
 
+## Voice transcript smoke (production `OpenAIRealtimeVoiceSession`, iOS only)
+
+A **separate entrypoint** — `lib/voice_transcript_smoke_main.dart` — physically
+tests the **production** public `OpenAIRealtimeVoiceSession` of
+`chat_ai_openai_realtime_voice` with the **optional final transcripts** turned
+on (`transcriptsEnabled: true`, default `inputTranscriptionModel`
+`gpt-4o-mini-transcribe`). It is **iOS only** and is not the feasibility probe
+above — it uses no `VoiceProbeSession`, no `record_transcribe`, writes no audio
+file and adds no native code.
+
+Exactly one mode per launch — **no default and no runtime switch**. Pass the
+mandatory `VOICE_SMOKE_MODE` define (an unknown/empty value shows the setup
+screen and creates no session):
+
+```
+flutter run \
+  -t lib/voice_transcript_smoke_main.dart \
+  --dart-define-from-file=smoke.realtime.ios.local.json \
+  --dart-define=VOICE_SMOKE_MODE=singleTurn
+```
+
+```
+flutter run \
+  -t lib/voice_transcript_smoke_main.dart \
+  --dart-define-from-file=smoke.realtime.ios.local.json \
+  --dart-define=VOICE_SMOKE_MODE=conversation
+```
+
+It reuses this harness's Firebase init and `SmokeClientSecretProvider`
+(`REALTIME_CLIENT_SECRET_ENDPOINT`, `CHAT_BOT_ID`, `FIREBASE_*` defines; no
+`SMOKE_BACKEND`), the existing Realtime mint endpoint and the direct
+device → OpenAI Realtime WebRTC session.
+
+The UI is minimal: coarse `OpenAIRealtimeVoicePhase`, coarse failure (if any),
+**Start**, **Stop**, and two separate lists — **User transcripts** and
+**Assistant transcripts**. Transcripts are **intentionally shown in the UI**,
+verbatim (no trim); this is the deliberate content channel of this smoke. The UI
+never shows and never logs the ephemeral secret, Firebase tokens, endpoint, SDP,
+raw Realtime events, provider errors, item/response/event ids, usage or track
+ids. One session per launch; **Start** runs exactly once.
+
+This smoke tests transcripts only — **audio recording and saving are not
+exercised here**; the old audio-recording feasibility probe remains a separate
+entrypoint (`lib/voice_probe_main.dart`).
+
 ## Build without a config
 
 `flutter build ios --no-codesign` builds without any local config: with no

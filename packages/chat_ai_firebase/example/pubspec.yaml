@@ -21,6 +21,13 @@ dependencies:
   chat_ai_openai_realtime:
     path: ../../chat_ai_openai_realtime
 
+  # The optional-final-transcript voice session under test
+  # (lib/voice_transcript_smoke_main.dart, VOICE_SMOKE_MODE=singleTurn|
+  # conversation). A TEST-HARNESS-ONLY dependency of this example; the three
+  # production packages keep their dependency isolation.
+  chat_ai_openai_realtime_voice:
+    path: ../../chat_ai_openai_realtime_voice
+
   # Firebase attestation for the live smoke path (no provider key on device).
   firebase_core: ^4.12.1
   firebase_auth: ^6.5.6
