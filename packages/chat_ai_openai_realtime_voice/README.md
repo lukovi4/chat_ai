@@ -78,9 +78,10 @@ session.transcripts.listen((transcript) {
 
 What to expect, honestly:
 
-- **Final transcripts only** — no deltas, no partials. The stream carries only
-  successfully-received final text; a *missing* user event can simply mean the
-  input ASR never produced a transcript.
+- **`transcripts` carries final transcripts only** — no deltas, no partials. It
+  carries only successfully-received final text; a *missing* user event can
+  simply mean the input ASR never produced a transcript. (Assistant transcript
+  **deltas** are available separately — see below.)
 - **Both sides** — `OpenAIRealtimeVoiceTranscriptRole.user` and `.assistant`.
 - **Default off** — nothing is emitted unless you set `transcriptsEnabled: true`.
 - **Input transcription is a separate OpenAI ASR model**
@@ -96,6 +97,56 @@ What to expect, honestly:
 - The package **stores nothing**: transcripts exist only in memory, on the
   broadcast stream, for as long as you listen. It never logs or persists them.
 
+### Assistant transcript deltas
+
+The **same** `transcriptsEnabled` opt-in also drives a `Stream<String>` of the
+assistant's transcript **deltas** for the current response — there is no separate
+option:
+
+```dart
+session.assistantTranscriptDeltas.listen((delta) {
+  // Append `delta` yourself to build the live text. Nothing else is emitted.
+});
+```
+
+- Each event is the raw `delta` of a `response.output_audio_transcript.delta`,
+  **verbatim and in order** — never trimmed, normalized, merged, deduplicated or
+  accumulated (two identical adjacent fragments are **both** emitted). The
+  application assembles any displayed text itself.
+- **Current response only**, strictly attributed to the active `response_id`;
+  deltas before `response.created`, foreign, malformed, or after an
+  interrupt/barge-in/terminal/`dispose()` are dropped.
+- It carries **no** id, index, usage, and never the final `.done` (that stays on
+  `transcripts`). Broadcast, in-memory only, no history; closed by `dispose()`.
+
+### Programmatic interrupt
+
+`Future<void> interruptResponse()` cancels the **current** assistant response
+(it is neither `stop()` nor `dispose()`). In **`conversation`** it does **not**
+end the session — it returns to `listening`; in **`singleTurn`** (whose one user
+turn is already closed) it ends the session as `ended` (see the mode note
+below):
+
+```dart
+await session.interruptResponse();
+```
+
+- **No active response → a completed no-op** (no client event, no state/transport
+  change, no re-mint).
+- With an active response it sends **exactly one** `response.cancel` immediately
+  followed by **one** `output_audio_buffer.clear` over the existing data channel
+  (no ack wait, no retry), finalizes an open assistant recording segment as an
+  interrupted partial, and abandons the response (its late
+  delta/audio/`response.done(cancelled)` become inert).
+- **`conversation`** stays live and returns to `listening` (mic still on, ready
+  for the next turn); **`singleTurn`** — whose one user turn is already closed —
+  ends as `ended` with exactly one transport close.
+- **Idempotent / memoized** per response: concurrent or repeat calls share one
+  operation (one cancel, one clear, one finalize).
+- A **send failure** surfaces only one coarse `OpenAIRealtimeVoiceFailure.transport`
+  with exactly-once teardown — no retry, reconnect, re-mint, second cancel/clear
+  or new response, and the raw exception never reaches state or logs.
+
 ### Privacy
 
 `OpenAIRealtimeVoiceState` carries only a coarse `phase` and an optional coarse
@@ -103,23 +154,116 @@ What to expect, honestly:
 audio, raw Realtime events, response bodies, provider errors, ids, usage and
 track ids never reach state, logs or exceptions.
 
-The **only** content the package ever surfaces is the optional `transcripts`
-stream, and only when the app opted in: it carries the final transcript text
-alone — never ids, usage, deltas or a failure. Input audio and transcripts are
+The only content the package ever surfaces is the optional transcript text —
+and only when the app opted in: the final `transcripts` stream (text alone, no
+ids/usage/failure) and the assistant `assistantTranscriptDeltas` stream (raw
+delta strings alone, no ids/indices/usage). Input audio and transcripts are
 handled directly inside the device → OpenAI Realtime session; the app's backend
 still receives only the mint request, never audio or a transcript. The package
-never logs or stores a transcript, not even in debug/test.
+never logs or stores a transcript or a delta, not even in debug/test.
 
 ## Physical smoke status
 
-Physical **iOS** transcript smoke of this package has been **run successfully**:
-both `singleTurn` and `conversation` were exercised on a physical iPhone against
-the production `OpenAIRealtimeVoiceSession`, and the final **user** and
-**assistant** transcripts were confirmed. Physical **Android** transcript smoke
-has **not** been run yet — Android is not claimed as ready.
+Physical **iOS** smoke of this package has been **run successfully** on a
+physical iPhone against the production `OpenAIRealtimeVoiceSession`, in both
+`singleTurn` and `conversation`, covering:
+
+- **final transcripts** — final user and assistant transcripts confirmed;
+- **assistant transcript deltas** — the `assistantTranscriptDeltas` fragments
+  grew during a reply and the assembled text matched the spoken answer;
+- **local recording** — separate user and assistant `.m4a` files were produced
+  and played back; `afinfo` confirmed the format on real device files (M4A /
+  AAC-LC / 16 kHz / mono / non-zero duration / ~32 kbit/s), file names are unique
+  and existing files are never deleted or overwritten;
+- **programmatic interrupt** — `interruptResponse()` stopped the assistant audio,
+  kept the `conversation` session live (back to `listening`), produced an
+  `interrupted: true` assistant partial, and stopped further deltas; a barge-in
+  and a manual `stop()` during user / assistant audio produced valid
+  `interrupted: true` partials and a clean `ended`;
+- normal replies reached `ended` / `listening` with **no** false
+  `responseTimeout`.
+
+This reflects a specific manual run, not an exhaustive guarantee. Physical
+**Android** smoke has **not** been run — Android is **not** claimed as ready.
+
+## Known limitations (out-of-order audio-buffer events)
+
+One low-severity behaviour exists only when the provider's event stream is
+**not spec-compliant** — events arrive out of order. On a well-ordered OpenAI
+Realtime stream (as exercised by the passing physical iOS smoke) it is not
+reachable. It is accepted as a known limitation; no automatic retry, reconnect
+or extra paid `response.create` is ever involved.
+
+- **singleTurn transcript wait, stray `output_audio_buffer.started`.** While a
+  `singleTurn` session (with `transcriptsEnabled: true`) is waiting for the
+  first reply's asynchronous user transcript after its response has completed, an
+  out-of-order `output_audio_buffer.started` for that same, already-finished
+  response — followed by a further progress event — can re-arm the idle watchdog
+  in place of the transcript-wait deadline. The turn then ends as a
+  `responseTimeout` **failure** instead of a normal `ended`. It still terminates
+  (no hang); only the terminal category is wrong.
+
+## Optional local audio recording (iOS only)
+
+Local recording is **off by default** (`recordingEnabled: false`). It reuses the
+SAME existing WebRTC local (user) and remote (assistant) audio tracks — there is
+**no second microphone**, no extra mint, no extra signaling, no new network
+request, and no retry/reconnect.
+
+Contract:
+
+- **Opt-in.** `recordingEnabled` defaults to `false`. When it is `true`,
+  `recordingDirectoryPath` is **required** and must be a non-empty **absolute**
+  path (validated synchronously before any mint; the validation error is
+  sanitized and never contains the path). When recording is off the path is
+  ignored and behaviour is unchanged.
+- **Format.** Each file is `.m4a` / **AAC-LC**, **16 kHz**, **mono**, target
+  **32 kbit/s** — the same profile as `record_transcribe`'s
+  `RecordingProfile.speechDefault()`. The device PCM is really resampled,
+  down-mixed and AAC-encoded on the iOS side (ExtAudioFile), never renamed; the
+  finished file is validated (format / rate / channels / non-zero frames) before
+  it is handed over.
+- **One file per reply.** Separate **user** and **assistant** files, one per
+  spoken reply — never a single mixed session file. Works in `singleTurn` and
+  `conversation`.
+- **Streams.** Finished files arrive on `recordings`
+  (`OpenAIRealtimeVoiceRecording` — role, `filePath`, optional `transcript`,
+  `interrupted`); a per-side failure arrives on `recordingFailures`
+  (`OpenAIRealtimeVoiceRecordingFailure` — role only). A recording failure is a
+  pure **side channel**: it never ends the voice session, never cancels a
+  Response and never triggers retry/reconnect/mint.
+- **Transcript may be null.** Recording and transcripts are independent. The
+  `transcript` is `null` when transcripts are off, when transcription
+  failed/timed out, or when no valid transcript for that exact reply arrived; a
+  successfully-received empty transcript is the empty string.
+- **`interrupted`.** `true` for the actually-captured partial fragment saved on a
+  stop, cancel or barge-in; `false` for a naturally completed reply.
+- **Event-driven boundaries (not sample-accurate).** A user reply spans a
+  validated `input_audio_buffer.speech_started` → `speech_stopped` pair; the
+  assistant reply spans `output_audio_buffer.started` → `stopped` of the active
+  response. A bounded pre-roll is prepended so onset is not clipped by event
+  latency. The OpenAI `audio_start_ms` / `audio_end_ms` are used **only** for
+  validation, item matching and dedup — **not** as sample-accurate PCM offsets:
+  the WebRTC audio-renderer tap delivers device PCM with no server timestamp, so
+  no OpenAI↔PCM timeline mapping exists over `flutter_webrtc` and **no
+  sample-accurate boundary is claimed**.
+- **Ownership.** After a file is delivered on `recordings` it belongs to the
+  application; the package never deletes, overwrites, plays back, uploads or
+  logs it. Every file gets a collision-resistant unique name and a finished file
+  is never replaced. Only this package's own unfinished temporary files are
+  deleted.
+- **`record_transcribe` is not used**; no upload, database, history or retention.
+- **iOS only.** Android recording is **not** implemented and not claimed as
+  ready; with `recordingEnabled: false` (or on Android) the voice behaviour is
+  entirely unchanged.
+- **Physical recording smoke has NOT been run yet** — recording is not claimed
+  production-ready.
 
 ## Not in this increment
 
-Audio recording, playback, waveform, transcript deltas/partials/history,
-persistence, tools/function calling and UI are **not** implemented. There is
-no native code in this package.
+Playback, waveform, transcript **history/accumulation**, transcript persistence,
+uploads, tools/function calling and UI are **not** implemented. Assistant
+transcript **deltas** (a raw `Stream<String>`, no accumulation) and a
+**programmatic interrupt** ARE implemented (see above). Local audio recording IS
+implemented for iOS (see above); its iOS-native writer is the only native code
+in this package, and it is exercised only when `recordingEnabled` is `true`.

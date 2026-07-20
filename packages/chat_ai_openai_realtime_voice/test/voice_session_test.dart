@@ -953,4 +953,145 @@ void main() {
       expect(_countSent(transport, 'session.update'), 1);
     },
   );
+
+  // ---- Lost response.done after output_audio_buffer.stopped --------------
+  // The turn must never hang: output_audio_buffer.stopped re-arms the existing
+  // watchdog for a fresh idle period; a completed response.done cancels it, its
+  // loss ends the session with exactly one responseTimeout.
+  group('lost response.done after output_audio_buffer.stopped', () {
+    // task test 1.
+    test(
+      'stopped with no matching done -> one responseTimeout, one close',
+      () async {
+        final factory = FakeWatchdogTimerFactory();
+        final t = FakeRealtimeVoiceTransport();
+        final s = build(t: t, timerFactory: factory.call);
+        addTearDown(s.dispose);
+        await reachListening(s, t);
+        t.emit(_responseCreated('r1'));
+        await pumpEventLoop();
+        t.emit(
+          _outputStopped('r1'),
+        ); // audio stopped, response.done not (yet) here
+        await pumpEventLoop();
+        // The watchdog is re-armed rather than left disarmed.
+        expect(factory.active, isNotNull);
+
+        factory.active!.fire();
+        await pumpEventLoop();
+        expect(s.state.phase, OpenAIRealtimeVoicePhase.failed);
+        expect(s.state.failure, OpenAIRealtimeVoiceFailure.responseTimeout);
+        expect(t.closeCalls, 1);
+        // Playback is already over: no extra cancel/clear.
+        expect(_countSent(t, 'response.cancel'), 0);
+        expect(_countSent(t, 'output_audio_buffer.clear'), 0);
+        // No retry/reconnect/re-mint/new Response.
+        expect(provider.calls, 1);
+        expect(t.connectCalls, 1);
+        expect(_countSent(t, 'response.create'), 0);
+        expect(factory.active, isNull);
+      },
+    );
+
+    // task test 2.
+    test(
+      'stopped then a completed done before deadline -> ended, no failure',
+      () async {
+        final factory = FakeWatchdogTimerFactory();
+        final t = FakeRealtimeVoiceTransport();
+        final s = build(t: t, timerFactory: factory.call);
+        addTearDown(s.dispose);
+        await reachListening(s, t);
+        t.emit(_responseCreated('r1'));
+        await pumpEventLoop();
+        t.emit(_outputStopped('r1'));
+        await pumpEventLoop();
+        final armed = factory.active;
+        expect(armed, isNotNull);
+
+        t.emit(_responseDone('r1')); // completed, before the deadline fires
+        await pumpEventLoop();
+        expect(
+          armed!.isCancelled,
+          isTrue,
+        ); // the re-armed deadline was cancelled
+        expect(s.state.phase, OpenAIRealtimeVoicePhase.ended);
+        expect(s.state.failure, isNull);
+        expect(t.closeCalls, 1);
+      },
+    );
+
+    // task test 3 (reverse order preserved).
+    test('a completed done then stopped still ends successfully', () async {
+      final t = FakeRealtimeVoiceTransport();
+      final s = build(t: t);
+      addTearDown(s.dispose);
+      await reachListening(s, t);
+      t.emit(_responseCreated('r1'));
+      await pumpEventLoop();
+      t.emit(_responseDone('r1')); // done first (waits for stopped)
+      t.emit(_outputStopped('r1'));
+      await pumpEventLoop();
+      expect(s.state.phase, OpenAIRealtimeVoicePhase.ended);
+      expect(s.state.failure, isNull);
+      expect(t.closeCalls, 1);
+    });
+
+    // task test 4 (duplicate stopped).
+    test('a duplicate stopped never re-arms a second deadline', () async {
+      final factory = FakeWatchdogTimerFactory();
+      final t = FakeRealtimeVoiceTransport();
+      final s = build(
+        mode: OpenAIRealtimeVoiceMode.conversation,
+        t: t,
+        timerFactory: factory.call,
+      );
+      addTearDown(s.dispose);
+      await reachListening(s, t);
+      t.emit(_responseCreated('r1'));
+      await pumpEventLoop();
+      t.emit(_outputStopped('r1'));
+      await pumpEventLoop();
+      final createdAfterFirst = factory.created.length;
+      // A duplicate output_audio_buffer.stopped for the same response.
+      t.emit(_outputStopped('r1'));
+      await pumpEventLoop();
+      expect(factory.created.length, createdAfterFirst); // no new deadline
+      expect(s.state.phase, isNot(OpenAIRealtimeVoicePhase.failed));
+      expect(s.state.phase, isNot(OpenAIRealtimeVoicePhase.ended));
+      expect(t.closeCalls, 0);
+    });
+
+    // task test 5 (foreign done after stopped keeps the deadline).
+    test(
+      'a foreign done after stopped does not complete; deadline -> timeout',
+      () async {
+        final factory = FakeWatchdogTimerFactory();
+        final t = FakeRealtimeVoiceTransport();
+        final s = build(t: t, timerFactory: factory.call);
+        addTearDown(s.dispose);
+        await reachListening(s, t);
+        t.emit(_responseCreated('r1'));
+        await pumpEventLoop();
+        t.emit(_outputStopped('r1'));
+        await pumpEventLoop();
+        final armed = factory.active;
+        expect(armed, isNotNull);
+        // A foreign response.done (different id) never satisfies completion...
+        t.emit(_responseDone('other'));
+        await pumpEventLoop();
+        expect(
+          armed!.isCancelled,
+          isFalse,
+        ); // the original deadline still stands
+        expect(s.state.phase, isNot(OpenAIRealtimeVoicePhase.ended));
+        // ...and the deadline yields exactly one responseTimeout.
+        armed.fire();
+        await pumpEventLoop();
+        expect(s.state.phase, OpenAIRealtimeVoicePhase.failed);
+        expect(s.state.failure, OpenAIRealtimeVoiceFailure.responseTimeout);
+        expect(t.closeCalls, 1);
+      },
+    );
+  });
 }

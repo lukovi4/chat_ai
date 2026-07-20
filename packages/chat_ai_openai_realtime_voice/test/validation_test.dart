@@ -18,6 +18,8 @@ void main() {
     FakeClientSecretProvider? provider,
     bool transcriptsEnabled = false,
     String inputTranscriptionModel = 'gpt-4o-mini-transcribe',
+    bool recordingEnabled = false,
+    String? recordingDirectoryPath,
   }) {
     return OpenAIRealtimeVoiceSession(
       clientSecretProvider: provider ?? FakeClientSecretProvider(),
@@ -28,6 +30,8 @@ void main() {
       responseIdleTimeout: responseIdleTimeout,
       transcriptsEnabled: transcriptsEnabled,
       inputTranscriptionModel: inputTranscriptionModel,
+      recordingEnabled: recordingEnabled,
+      recordingDirectoryPath: recordingDirectoryPath,
     );
   }
 
@@ -129,5 +133,72 @@ void main() {
       build(inputTranscriptionModel: ''),
       isA<OpenAIRealtimeVoiceSession>(),
     );
+  });
+
+  // Required test 2 (recording half): the recording directory is validated
+  // synchronously — before the provider / any network — but only when recording
+  // is enabled.
+  test(
+    'a missing/empty/relative recording directory is rejected before mint',
+    () {
+      final provider = FakeClientSecretProvider();
+      final bad = <String?>[null, '', '   ', 'relative/dir', 'recordings'];
+      for (final path in bad) {
+        expect(
+          () => build(
+            provider: provider,
+            recordingEnabled: true,
+            recordingDirectoryPath: path,
+          ),
+          throwsArgumentError,
+          reason: '"$path"',
+        );
+      }
+      // The rejection happened synchronously, before any mint.
+      expect(provider.calls, 0);
+    },
+  );
+
+  test('recordingEnabled with a non-empty absolute path constructs fine', () {
+    expect(
+      build(
+        recordingEnabled: true,
+        recordingDirectoryPath: '/var/mobile/Documents/recordings',
+      ),
+      isA<OpenAIRealtimeVoiceSession>(),
+    );
+  });
+
+  test('a recording directory is ignored while recording is off', () {
+    // recordingEnabled defaults to false, so the path is never validated.
+    expect(
+      build(recordingDirectoryPath: 'not-absolute'),
+      isA<OpenAIRealtimeVoiceSession>(),
+    );
+    expect(build(), isA<OpenAIRealtimeVoiceSession>());
+  });
+
+  // Required test 8 (task_2): the validation exception is SANITIZED — the
+  // offending directory path (which can itself be sensitive) never appears in
+  // the exception text.
+  test('the recording-directory validation error never leaks the path', () {
+    const secret = 'SUPER-SECRET-recordings-path-abc123';
+    Object? caught;
+    try {
+      build(recordingEnabled: true, recordingDirectoryPath: secret);
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught, isA<ArgumentError>());
+    expect(caught.toString().contains(secret), isFalse);
+    // A different sensitive-looking absolute-but-blank variant also stays clean.
+    Object? caught2;
+    try {
+      build(recordingEnabled: true, recordingDirectoryPath: '   ');
+    } catch (e) {
+      caught2 = e;
+    }
+    expect(caught2, isA<ArgumentError>());
+    expect(caught2.toString().contains('   '), isFalse);
   });
 }

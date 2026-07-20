@@ -36,6 +36,9 @@ import 'package:chat_ai_openai_realtime/chat_ai_openai_realtime.dart'
 import 'package:flutter/foundation.dart';
 
 import 'voice_cancellation.dart';
+import 'voice_recorder.dart';
+import 'voice_recording.dart';
+import 'voice_recording_coordinator.dart';
 import 'voice_session_update.dart';
 import 'voice_state.dart';
 import 'voice_transcript.dart';
@@ -71,6 +74,8 @@ class OpenAIRealtimeVoiceSession {
     Duration responseIdleTimeout = const Duration(seconds: 60),
     bool transcriptsEnabled = false,
     String inputTranscriptionModel = 'gpt-4o-mini-transcribe',
+    bool recordingEnabled = false,
+    String? recordingDirectoryPath,
   }) : this._(
          clientSecretProvider: clientSecretProvider,
          botProfile: botProfile,
@@ -81,8 +86,13 @@ class OpenAIRealtimeVoiceSession {
          responseIdleTimeout: responseIdleTimeout,
          transcriptsEnabled: transcriptsEnabled,
          inputTranscriptionModel: inputTranscriptionModel,
+         recordingEnabled: recordingEnabled,
+         recordingDirectoryPath: recordingDirectoryPath,
          transportFactory: _defaultTransportFactory,
          timerFactory: _defaultWatchdogTimer,
+         // The production recorder factory is built lazily below, only after
+         // synchronous validation has accepted an absolute directory path.
+         recorderFactory: null,
        );
 
   OpenAIRealtimeVoiceSession._({
@@ -95,8 +105,11 @@ class OpenAIRealtimeVoiceSession {
     required Duration responseIdleTimeout,
     required bool transcriptsEnabled,
     required String inputTranscriptionModel,
+    required bool recordingEnabled,
+    required String? recordingDirectoryPath,
     required RealtimeVoiceTransportFactory transportFactory,
     required VoiceWatchdogTimerFactory timerFactory,
+    required RealtimeVoiceRecorderFactory? recorderFactory,
   }) : _provider = clientSecretProvider,
        _botProfile = botProfile,
        _mode = mode,
@@ -106,9 +119,29 @@ class OpenAIRealtimeVoiceSession {
        _responseIdleTimeout = responseIdleTimeout,
        _transcriptsEnabled = transcriptsEnabled,
        _inputTranscriptionModel = inputTranscriptionModel,
+       _recordingEnabled = recordingEnabled,
+       _recordingDirectoryPath = recordingDirectoryPath,
        _transportFactory = transportFactory,
        _timerFactory = timerFactory {
     _validate();
+    if (_recordingEnabled) {
+      // A test may inject a Dart-only fake factory; production builds the native
+      // (iOS) writer factory bound to the validated directory. PCM never crosses
+      // the boundary — see [NativeRealtimeVoiceRecorderFactory].
+      final factory =
+          recorderFactory ??
+          NativeRealtimeVoiceRecorderFactory(
+            directoryPath: _recordingDirectoryPath!,
+          ).call;
+      _recording = VoiceRecordingCoordinator(
+        recorderFactory: factory,
+        transcriptsEnabled: _transcriptsEnabled,
+        transcriptPairingTimeout: _responseIdleTimeout,
+        timerFactory: _timerFactory,
+        onRecording: _emitRecording,
+        onFailure: _emitRecordingFailure,
+      );
+    }
   }
 
   final ClientSecretProvider _provider;
@@ -120,18 +153,49 @@ class OpenAIRealtimeVoiceSession {
   final Duration _responseIdleTimeout;
   final bool _transcriptsEnabled;
   final String _inputTranscriptionModel;
+  final bool _recordingEnabled;
+  final String? _recordingDirectoryPath;
   final RealtimeVoiceTransportFactory _transportFactory;
   final VoiceWatchdogTimerFactory _timerFactory;
+
+  // The optional recording coordinator. Non-null only when the app opted in AND
+  // a recorder factory exists (production always builds one). It owns the two
+  // native writers and emits finished files / per-side failures.
+  VoiceRecordingCoordinator? _recording;
 
   final StreamController<OpenAIRealtimeVoiceState> _states =
       StreamController<OpenAIRealtimeVoiceState>.broadcast();
   OpenAIRealtimeVoiceState _state = const OpenAIRealtimeVoiceState.idle();
+
+  // The optional local-recording side channels. In-memory broadcast only; they
+  // exist even when recording is off (they simply stay silent) and are closed in
+  // dispose() alongside [_states].
+  final StreamController<OpenAIRealtimeVoiceRecording> _recordings =
+      StreamController<OpenAIRealtimeVoiceRecording>.broadcast();
+  final StreamController<OpenAIRealtimeVoiceRecordingFailure>
+  _recordingFailures =
+      StreamController<OpenAIRealtimeVoiceRecordingFailure>.broadcast();
+
+  // The current OPEN user recording segment (recording-only bookkeeping). The
+  // item id and its verified audio_start_ms let a later speech_stopped be
+  // validated as a matched VAD pair before the segment is cut.
+  String? _recUserItemId;
+  int _recUserStartMs = 0;
 
   // The optional final-transcript side channel. In-memory only, no history; it
   // exists at all only when the app opted in. Closed in dispose() alongside
   // [_states]; a terminal teardown forbids any further transcript event.
   final StreamController<OpenAIRealtimeVoiceTranscript> _transcripts =
       StreamController<OpenAIRealtimeVoiceTranscript>.broadcast();
+
+  // The OPTIONAL assistant transcript-DELTA side channel (only meaningful when
+  // transcriptsEnabled). Broadcast, in-memory only, no history: it carries the
+  // raw `delta` String of each response.output_audio_transcript.delta of the
+  // CURRENT response, verbatim and in order — never an id/index/usage, never the
+  // final `.done` (that stays on [_transcripts]). Closed in dispose(). The text
+  // is never logged or stored.
+  final StreamController<String> _assistantTranscriptDeltas =
+      StreamController<String>.broadcast();
 
   // Lifecycle guards.
   bool _startCalled = false; // start() is allowed exactly once.
@@ -141,6 +205,10 @@ class OpenAIRealtimeVoiceSession {
   RealtimeVoiceTransport? _transport;
   StreamSubscription<Map<String, Object?>>? _eventsSub;
   Future<void>? _teardown; // memoized exactly-once teardown.
+  // Completes at the first terminal teardown (any path). The recording
+  // remote-track waiter races this so it can NEVER stay pending after a
+  // terminate/close/cancel, without triggering the transport's release early.
+  final Completer<void> _terminating = Completer<void>();
 
   bool _sessionUpdateSent = false;
   bool _userTurnClosed = false; // singleTurn: the one user turn has ended.
@@ -164,6 +232,29 @@ class OpenAIRealtimeVoiceSession {
   bool _outputAudioStopped = false;
   bool _responseCancelSent = false;
   Timer? _watchdog;
+  // Memoized programmatic-interrupt operation for the CURRENT response. Set on
+  // the first interruptResponse() for a response so concurrent/repeat calls
+  // share one result (exactly one cancel/clear/finalize); reset to null when the
+  // next response.created binds a fresh response.
+  Future<void>? _interrupt;
+  // A monotonic counter for INTERNAL client-event ids on programmatic
+  // cancel/clear. The ids are opaque (`pcx_<n>` / `pcl_<n>`), never exported,
+  // logged, or placed in state/exceptions, and carry no user data.
+  int _clientEventSeq = 0;
+  // The internal event ids of programmatic `response.cancel`s whose correlated
+  // server `error` is RECOVERABLE (the server had nothing to cancel). Minimal
+  // correlation only; kept until terminal teardown (NOT cleared when the next
+  // response binds — a safe late error for a previous response's cancel can
+  // arrive after a newer response and must stay inert). The clear event id is
+  // deliberately NOT tracked here (a clear error stays terminal).
+  final Set<String> _recoverableCancelEventIds = <String>{};
+  // Increments on every processed user speech_started and every newly-bound
+  // response, so a still-in-flight programmatic interrupt can tell whether a
+  // NEWER turn/response arose since it began (and thus must not overwrite the
+  // newer state with `listening`).
+  int _turnEpoch = 0;
+
+  String _nextClientEventId(String prefix) => '${prefix}_${_clientEventSeq++}';
 
   // ---- Optional transcript attribution (only when _transcriptsEnabled) -----
   // Minimal in-memory bookkeeping so a final transcript can be attributed to a
@@ -227,6 +318,21 @@ class OpenAIRealtimeVoiceSession {
         'must not be empty when transcriptsEnabled is true',
       );
     }
+    if (_recordingEnabled) {
+      // A missing / empty / non-absolute directory is rejected synchronously,
+      // BEFORE any mint/network. When recording is off the path is ignored.
+      //
+      // The exception is SANITIZED: it names only the parameter and the rule,
+      // never the offending path value — a directory path can itself be
+      // sensitive, so it must never appear in an exception's toString or a log.
+      final path = _recordingDirectoryPath;
+      if (path == null || path.trim().isEmpty || !path.startsWith('/')) {
+        throw ArgumentError(
+          'recordingDirectoryPath must be a non-empty absolute path when '
+          'recordingEnabled is true',
+        );
+      }
+    }
   }
 
   OpenAIRealtimeVoiceState get state => _state;
@@ -238,6 +344,46 @@ class OpenAIRealtimeVoiceSession {
   /// user and assistant — and never deltas, ids, usage or a failure. Closed by
   /// [dispose].
   Stream<OpenAIRealtimeVoiceTranscript> get transcripts => _transcripts.stream;
+
+  /// A broadcast stream of the assistant transcript DELTAS of the current
+  /// response, in arrival order. Each event is the raw `delta` String of a
+  /// `response.output_audio_transcript.delta`, passed through EXACTLY as
+  /// received — never trimmed, normalized, merged, deduplicated or accumulated
+  /// (two identical adjacent fragments are BOTH emitted). The application
+  /// assembles any displayed text itself.
+  ///
+  /// It emits nothing unless `transcriptsEnabled` was set at construction, and
+  /// never carries an id, index, usage or the final `.done` (which stays on
+  /// [transcripts]). It shares the SAME `transcriptsEnabled` opt-in — there is no
+  /// separate option. Closed by [dispose].
+  Stream<String> get assistantTranscriptDeltas =>
+      _assistantTranscriptDeltas.stream;
+
+  /// A broadcast stream of finished per-reply recordings, in the order they were
+  /// finalized. Emits nothing unless `recordingEnabled` was set at construction.
+  /// Each event carries the app-owned `.m4a` path, the optional paired transcript
+  /// and the [OpenAIRealtimeVoiceRecording.interrupted] flag. Closed by
+  /// [dispose].
+  Stream<OpenAIRealtimeVoiceRecording> get recordings => _recordings.stream;
+
+  /// A broadcast stream of coarse per-side recording failures. It is a SIDE
+  /// CHANNEL: a recording failure never becomes an [OpenAIRealtimeVoiceState]
+  /// failure, never ends the session and never triggers a retry/reconnect/mint.
+  /// Closed by [dispose].
+  Stream<OpenAIRealtimeVoiceRecordingFailure> get recordingFailures =>
+      _recordingFailures.stream;
+
+  void _emitRecording(OpenAIRealtimeVoiceRecording recording) {
+    if (!_recordings.isClosed) {
+      _recordings.add(recording);
+    }
+  }
+
+  void _emitRecordingFailure(OpenAIRealtimeVoiceRecordingFailure failure) {
+    if (!_recordingFailures.isClosed) {
+      _recordingFailures.add(failure);
+    }
+  }
 
   void _emit(OpenAIRealtimeVoiceState next) {
     _state = next;
@@ -349,7 +495,7 @@ class OpenAIRealtimeVoiceSession {
       case 'session.updated':
         _onSessionUpdated();
       case 'input_audio_buffer.speech_started':
-        _onSpeechStarted();
+        _onSpeechStarted(event);
       case 'input_audio_buffer.speech_stopped':
         _onSpeechStopped(event);
       case 'response.created':
@@ -364,10 +510,12 @@ class OpenAIRealtimeVoiceSession {
         _onUserTranscriptCompleted(event);
       case 'conversation.item.input_audio_transcription.failed':
         _onUserTranscriptFailed(event);
+      case 'response.output_audio_transcript.delta':
+        _onAssistantTranscriptDelta(event);
       case 'response.output_audio_transcript.done':
         _onAssistantTranscriptDone(event);
       case 'error':
-        await _onErrorEvent();
+        await _onErrorEvent(event);
     }
   }
 
@@ -415,16 +563,80 @@ class OpenAIRealtimeVoiceSession {
   /// Enables the one microphone track exactly once, and ONLY when both a
   /// successful session.updated has been acknowledged AND transport.connect()
   /// (including audio configuration) has fully returned.
+  ///
+  /// When recording is enabled the USER tap is attached to the EXISTING local
+  /// track BEFORE the microphone goes live (so the onset of the reply is never
+  /// clipped); the mic is then enabled and the ASSISTANT tap is attached in the
+  /// background once the remote track id is available.
   void _maybeEnableMic() {
     if (!_active || _micEnabled || !_connectCompleted || !_sessionUpdatedAck) {
       return;
     }
-    _micEnabled = true;
-    _transport?.setMicrophoneEnabled(true);
-    _setPhase(OpenAIRealtimeVoicePhase.listening);
+    _micEnabled = true; // latched here so this runs exactly once
+    final recording = _recording;
+    if (recording == null) {
+      _transport?.setMicrophoneEnabled(true);
+      _setPhase(OpenAIRealtimeVoicePhase.listening);
+      return;
+    }
+    unawaited(_armRecordersThenEnableMic(recording));
   }
 
-  void _onSpeechStarted() {
+  Future<void> _armRecordersThenEnableMic(
+    VoiceRecordingCoordinator recording,
+  ) async {
+    final transport = _transport;
+    if (transport == null) {
+      return;
+    }
+    // Attach the USER tap first — before the mic is enabled — so the very start
+    // of the user's reply is captured. A recorder failure here is a side-channel
+    // failure only and never blocks the mic or the voice session.
+    final localId = transport.localAudioTrackId;
+    if (localId != null && localId.isNotEmpty) {
+      try {
+        await recording.attachUser(localId);
+      } catch (_) {}
+    }
+    if (!_active) {
+      return; // a teardown raced the async arming
+    }
+    transport.setMicrophoneEnabled(true);
+    _setPhase(OpenAIRealtimeVoicePhase.listening);
+    unawaited(_attachAssistantRecorder(recording, transport));
+  }
+
+  /// Attaches the assistant tap once the remote track id is available. The wait
+  /// is raced against BOTH the setup cancellation and the terminal-teardown
+  /// signal, so it can never stay pending after a terminate/close/cancel — even
+  /// when the remote track never arrives (a session that closes before the
+  /// assistant ever speaks). A late arrival after teardown is ignored.
+  Future<void> _attachAssistantRecorder(
+    VoiceRecordingCoordinator recording,
+    RealtimeVoiceTransport transport,
+  ) async {
+    final cancellation = _cancellation;
+    String? remoteId;
+    try {
+      remoteId = await Future.any<String?>(<Future<String?>>[
+        transport.remoteAudioTrackId,
+        _terminating.future.then((_) => null),
+        if (cancellation != null) cancellation.whenCancelled.then((_) => null),
+      ]);
+    } catch (_) {
+      return;
+    }
+    if (remoteId == null || remoteId.isEmpty || !_active) {
+      // The session closed before the assistant reply began, or the track never
+      // arrived: no attach, no false failure for a role that never spoke.
+      return;
+    }
+    try {
+      await recording.attachAssistant(remoteId);
+    } catch (_) {}
+  }
+
+  void _onSpeechStarted(Map<String, Object?> event) {
     if (!_active || !_micEnabled) {
       return;
     }
@@ -432,14 +644,56 @@ class OpenAIRealtimeVoiceSession {
       // singleTurn accepts exactly one user turn; the mic is already off.
       return;
     }
+    // A new user turn begins — a newer state than any in-flight interrupt.
+    _turnEpoch++;
     if (_responseActive) {
       // Barge-in: the server (interrupt_response: true) cancels the response
       // and truncates unplayed audio itself. We send NO redundant
       // response.cancel/truncate — only reflect the state and stop the
-      // watchdog for the abandoned response.
+      // watchdog for the abandoned response. The assistant's actually-played
+      // fragment is finalized as an interrupted recording.
+      final responseId = _activeResponseId;
+      if (responseId != null) {
+        _recording?.interruptAssistantSegment(responseId);
+      }
       _abandonActiveResponse();
     }
+    _beginUserRecordingSegment(event);
     _setPhase(OpenAIRealtimeVoicePhase.userSpeaking);
+  }
+
+  /// Opens a user recording segment on a verified speech_started boundary: a
+  /// non-empty item id and a non-negative integer `audio_start_ms`. The
+  /// continuously-attached tap (armed before the mic) preserves the onset.
+  ///
+  /// Boundaries are EVENT-DRIVEN: the segment spans the arrival of a valid
+  /// speech_started → speech_stopped pair. `audio_start_ms` / `audio_end_ms` are
+  /// used ONLY for validation, item_id matching and dedup — never as sample-
+  /// accurate PCM offsets (see the package docs: no OpenAI↔PCM timeline mapping
+  /// exists over flutter_webrtc, so no sample-accurate boundary is claimed).
+  ///
+  /// Only ONE user segment is active at a time. While one is open, any further
+  /// speech_started (a duplicate, an overlapping start, or an out-of-order
+  /// event) is IGNORED: it never closes, replaces or destroys the active
+  /// segment's in-progress file.
+  void _beginUserRecordingSegment(Map<String, Object?> event) {
+    final recording = _recording;
+    if (recording == null) {
+      return;
+    }
+    if (_recUserItemId != null) {
+      // A user segment is already open — never overwrite it. A repeat/overlap/
+      // out-of-order speech_started is dropped here.
+      return;
+    }
+    final itemId = _asNonEmptyString(event['item_id']);
+    final startMs = event['audio_start_ms'];
+    if (itemId == null || !_isNonNegativeInt(startMs)) {
+      return;
+    }
+    _recUserItemId = itemId;
+    _recUserStartMs = startMs! as int;
+    recording.beginUserSegment(itemId);
   }
 
   void _onSpeechStopped(Map<String, Object?> event) {
@@ -456,8 +710,32 @@ class OpenAIRealtimeVoiceSession {
       _transport?.setMicrophoneEnabled(false);
     }
     _trackUserItem(event);
+    _endUserRecordingSegment(event);
     // The assistant's response follows (server VAD create_response).
     _setPhase(OpenAIRealtimeVoicePhase.assistantSpeaking);
+  }
+
+  /// Closes the open user recording segment on a verified speech_stopped
+  /// boundary: the SAME non-empty item id, a non-negative integer audio_end_ms,
+  /// and audio_end_ms >= the segment's audio_start_ms. A malformed / foreign /
+  /// duplicate stop does not cut the segment (it is left open; a valid stop, or
+  /// teardown as an interrupted fragment, closes it) and never fabricates a file.
+  void _endUserRecordingSegment(Map<String, Object?> event) {
+    final recording = _recording;
+    final openItemId = _recUserItemId;
+    if (recording == null || openItemId == null) {
+      return;
+    }
+    final itemId = _asNonEmptyString(event['item_id']);
+    final endMs = event['audio_end_ms'];
+    if (itemId != openItemId ||
+        !_isNonNegativeInt(endMs) ||
+        (endMs! as int) < _recUserStartMs) {
+      return;
+    }
+    _recUserItemId = null;
+    _recUserStartMs = 0;
+    recording.endUserSegment(openItemId);
   }
 
   /// Remembers the user reply's item id so a later
@@ -512,6 +790,16 @@ class OpenAIRealtimeVoiceSession {
     _responseDone = false;
     _outputAudioStopped = false;
     _responseCancelSent = false;
+    // A fresh response is interruptible again: drop any memoized interrupt of a
+    // previous response and mark a newer state than any in-flight interrupt.
+    // The programmatic-cancel recoverable-error correlation is deliberately NOT
+    // cleared here: a SAFE late server `error` for the PREVIOUS response's
+    // cancel can arrive after this new response was created and must stay inert
+    // (it must never terminate the new, live response). Those ids are unique per
+    // cancel and only ever match their own server error, so keeping them until
+    // terminal teardown is safe.
+    _interrupt = null;
+    _turnEpoch++;
     _setPhase(OpenAIRealtimeVoicePhase.assistantSpeaking);
     _kickWatchdog();
   }
@@ -521,6 +809,13 @@ class OpenAIRealtimeVoiceSession {
       return;
     }
     _responseActive = true;
+    // Begin the assistant recording segment at the actual start of output audio
+    // of THIS response (the continuously-attached remote tap preserves the
+    // onset). A duplicate started is ignored by the coordinator.
+    final responseId = _activeResponseId;
+    if (responseId != null) {
+      _recording?.beginAssistantSegment(responseId);
+    }
     _setPhase(OpenAIRealtimeVoicePhase.assistantSpeaking);
   }
 
@@ -529,10 +824,33 @@ class OpenAIRealtimeVoiceSession {
     if (!_active || !_matchesActiveResponse(_topResponseId(event))) {
       return;
     }
+    if (_outputAudioStopped) {
+      // A duplicate output_audio_buffer.stopped for the SAME response never
+      // re-finalizes the recording, re-arms the idle deadline or re-evaluates.
+      return;
+    }
     _outputAudioStopped = true;
     _responseActive = false;
-    _disarmWatchdog();
-    _evaluateResponseCompletion();
+    // A naturally completed assistant reply: close its segment (not interrupted)
+    // while the active response id is still bound.
+    final responseId = _activeResponseId;
+    if (responseId != null) {
+      _recording?.endAssistantSegment(responseId);
+    }
+    if (_responseDone) {
+      // Both conditions met — the normal completion path (which disarms the
+      // watchdog) closes the turn.
+      _disarmWatchdog();
+      _evaluateResponseCompletion();
+    } else {
+      // The audio stopped but the matching response.done has NOT arrived yet.
+      // Re-arm the EXISTING watchdog for a fresh idle period so a LOST
+      // response.done can never hang the turn: a completed response.done that
+      // arrives first cancels this deadline and completes the turn normally;
+      // otherwise the deadline ends the session with exactly one
+      // responseTimeout. Reuses the existing timer seam — no new timeout/option.
+      _kickWatchdog();
+    }
   }
 
   void _onResponseDone(Map<String, Object?> event) {
@@ -678,6 +996,8 @@ class OpenAIRealtimeVoiceSession {
       return;
     }
     _emitTranscript(OpenAIRealtimeVoiceTranscriptRole.user, transcript);
+    // Pair the file with THIS reply's transcript (empty stays an empty string).
+    _recording?.resolveUserTranscript(itemId, text: transcript);
     _resolveUserTranscriptWait(itemId);
   }
 
@@ -704,7 +1024,41 @@ class OpenAIRealtimeVoiceSession {
     if (!_resolvedUserItemIds.add(itemId)) {
       return;
     }
+    // A transcription failure pairs the file with a null transcript.
+    _recording?.resolveUserTranscript(itemId, text: null);
     _resolveUserTranscriptWait(itemId);
+  }
+
+  /// A valid assistant transcript DELTA of the CURRENT response. Strict
+  /// attribution: the session is active, transcripts are enabled, a current
+  /// active response is already bound and the event's non-empty `response_id`
+  /// matches it EXACTLY, `item_id` is a non-empty String, `output_index` and
+  /// `content_index` are non-negative ints and `delta` is a String. A malformed,
+  /// foreign, before-response.created, or post-interrupt/barge-in/terminal/
+  /// dispose delta is ignored (post-abandon there is no active id to match). The
+  /// raw `delta` is emitted verbatim; nothing else (id/index/usage) leaves the
+  /// package and the content is never logged.
+  void _onAssistantTranscriptDelta(Map<String, Object?> event) {
+    if (!_active || !_transcriptsEnabled) {
+      return;
+    }
+    final responseId = _asNonEmptyString(event['response_id']);
+    if (responseId == null || !_matchesActiveResponse(responseId)) {
+      return;
+    }
+    final itemId = _asNonEmptyString(event['item_id']);
+    if (itemId == null ||
+        !_isNonNegativeInt(event['output_index']) ||
+        !_isNonNegativeInt(event['content_index'])) {
+      return;
+    }
+    final delta = event['delta'];
+    if (delta is! String) {
+      return;
+    }
+    if (!_assistantTranscriptDeltas.isClosed) {
+      _assistantTranscriptDeltas.add(delta);
+    }
   }
 
   /// A valid final ASSISTANT transcript. Emitted for any response id THIS
@@ -737,6 +1091,8 @@ class OpenAIRealtimeVoiceSession {
       return;
     }
     _emitTranscript(OpenAIRealtimeVoiceTranscriptRole.assistant, transcript);
+    // Pair the assistant file with THIS response's transcript.
+    _recording?.resolveAssistantTranscript(responseId, text: transcript);
   }
 
   /// The one transcript sink. A terminal teardown closes the controller, so a
@@ -749,9 +1105,25 @@ class OpenAIRealtimeVoiceSession {
     _transcripts.add(OpenAIRealtimeVoiceTranscript(role: role, text: text));
   }
 
-  Future<void> _onErrorEvent() async {
+  Future<void> _onErrorEvent(Map<String, Object?> event) async {
     if (!_active) {
       return;
+    }
+    // A RECOVERABLE programmatic-cancel error: when interruptResponse() cancels a
+    // response the server may already have finished generating, the server
+    // returns an `error` but the session stays usable. Correlate ONLY by the
+    // structurally-required nested `error.event_id` against the ids of the
+    // programmatic `response.cancel`(s) we sent; nothing else (message/code/
+    // param) is read, stored or logged. A correlated cancel error is inert (the
+    // current — possibly newer — state is left unchanged). A `clear` error, a
+    // foreign/malformed/unrelated error and any error with no matching id stay
+    // terminal by the existing contract.
+    final error = event['error'];
+    if (error is Map) {
+      final eventId = error['event_id'];
+      if (eventId is String && _recoverableCancelEventIds.contains(eventId)) {
+        return;
+      }
     }
     // Nothing from the raw event (message/code/param/event_id) is stored. A
     // setup-phase error is a session failure; a live-session error is a
@@ -885,15 +1257,24 @@ class OpenAIRealtimeVoiceSession {
   }
 
   void _onWatchdogTimeout() {
-    if (!_active || !_responseActive) {
+    if (!_active) {
       return;
     }
-    // An active response went idle: one terminal failure, one best-effort
-    // cancel/clear, one teardown. No second mint or response.
+    // A lost response.done AFTER output audio stopped is also an unfinished
+    // response (its audio is over, but the server never confirmed completion).
+    final audioStoppedWithoutDone =
+        _activeResponseId != null && _outputAudioStopped && !_responseDone;
+    if (!_responseActive && !audioStoppedWithoutDone) {
+      return;
+    }
+    // One terminal failure, one teardown, no second mint or response. When a
+    // paid response may still be generating (audio not yet stopped) a
+    // best-effort cancel/clear is sent; once the audio has already stopped none
+    // is sent (playback is already over).
     unawaited(
       _failAndTeardown(
         OpenAIRealtimeVoiceFailure.responseTimeout,
-        cancelActiveResponse: true,
+        cancelActiveResponse: _responseActive,
       ),
     );
   }
@@ -915,6 +1296,142 @@ class OpenAIRealtimeVoiceSession {
 
   static String? _asNonEmptyString(Object? value) =>
       value is String && value.isNotEmpty ? value : null;
+
+  // ---- Programmatic interrupt --------------------------------------------
+
+  /// Programmatically interrupts the CURRENT active response (push-to-talk
+  /// style). This is NOT [stop] / [dispose]: the WebRTC session — and, in
+  /// `conversation`, the microphone — stay live.
+  ///
+  /// With no active response it is a completed no-op: no client event, no state
+  /// or transport change, no mint/response.
+  ///
+  /// With an active response it does, EXACTLY ONCE (memoized across
+  /// concurrent/repeat calls for that response):
+  /// 1. finalizes an open assistant recording segment as an interrupted partial
+  ///    (immediately — it never waits for a transcript before stopping audio);
+  /// 2. stops the response watchdog and abandons the response;
+  /// 3. sends over the existing DataChannel EXACTLY one `response.cancel`
+  ///    immediately followed by one `output_audio_buffer.clear` — no wait for a
+  ///    server ack, no retry. The clear is attempted even if the cancel throws.
+  ///
+  /// After a successful send the response is abandoned, so its late
+  /// delta/audio/`response.done(status: cancelled)` are inert; a late valid
+  /// FINAL assistant transcript for that (still-known) response is still handled
+  /// by the existing final-transcript contract. No new response is created.
+  /// In `conversation` the session returns to `listening` (WebRTC + mic stay
+  /// live, ready for the next VAD turn); in `singleTurn` — whose one user turn is
+  /// already closed — it ends as `ended` with exactly one transport close and NO
+  /// second cancel/clear.
+  ///
+  /// A send failure surfaces ONLY one coarse
+  /// [OpenAIRealtimeVoiceFailure.transport] with exactly-once teardown — no
+  /// retry, reconnect, re-mint, second cancel/clear or new response, and the raw
+  /// exception never reaches state or logs. A server `error` correlated (by the
+  /// nested `error.event_id`) to the programmatic `response.cancel` — which the
+  /// server may return when it had already finished the response — is
+  /// RECOVERABLE and leaves the session live; an error correlated to the
+  /// `output_audio_buffer.clear`, or any other error, stays terminal.
+  Future<void> interruptResponse() {
+    if (!_active) {
+      return Future<void>.value();
+    }
+    final existing = _interrupt;
+    if (existing != null) {
+      // A concurrent/repeat call for the current response shares one operation.
+      return existing;
+    }
+    if (_activeResponseId == null || !_responseActive) {
+      // No active response → completed no-op (no events, no state change).
+      return Future<void>.value();
+    }
+    return _interrupt = _interruptOnce();
+  }
+
+  Future<void> _interruptOnce() async {
+    // Snapshot BEFORE mutating local state: the captured response id (so the
+    // cancel can NEVER hit a newer response) and the turn epoch (so a newer
+    // turn/response that arises during the sends is never overwritten).
+    final responseId = _activeResponseId;
+    final startEpoch = _turnEpoch;
+    final transport = _transport;
+    // Opaque INTERNAL client-event ids (never exported/logged; no user data).
+    final cancelEventId = _nextClientEventId('pcx');
+    final clearEventId = _nextClientEventId('pcl');
+
+    // Guard against a second cancel/clear from a later teardown/watchdog.
+    _responseCancelSent = true;
+    // Finalize ONLY this response's open assistant segment as an interrupted
+    // partial NOW; never wait for a transcript before stopping the audio, and
+    // never touch a newer response's recording.
+    if (responseId != null) {
+      _recording?.interruptAssistantSegment(responseId);
+    }
+    _disarmWatchdog();
+    // Abandon ONLY this response (keep _responseCancelSent = true) so its late
+    // events are inert; a newer response, if it binds during the sends, is
+    // untouched.
+    if (_activeResponseId == responseId) {
+      _activeResponseId = null;
+      _responseActive = false;
+      _responseDone = false;
+      _outputAudioStopped = false;
+    }
+
+    if (transport == null) {
+      await _failAndTeardown(
+        OpenAIRealtimeVoiceFailure.transport,
+        cancelActiveResponse: false,
+      );
+      return;
+    }
+
+    // Remember the recoverable-cancel correlation BEFORE sending, so a fast
+    // server error can never race ahead of it.
+    _recoverableCancelEventIds.add(cancelEventId);
+    // Enqueue BOTH events SYNCHRONOUSLY (cancel then clear) before any await, so
+    // no incoming event can slip between them and so the old interrupt cannot
+    // cancel a response bound later. The cancel carries the CAPTURED response_id.
+    // An error handler is attached to EACH send immediately (so a failed send is
+    // never an unhandled async error), turning each into an ok/failed result;
+    // both are then awaited. Both are attempted exactly once even if the cancel
+    // fails — no retry.
+    final cancelOk = transport
+        .send(<String, Object?>{
+          'type': 'response.cancel',
+          'response_id': ?responseId,
+          'event_id': cancelEventId,
+        })
+        .then((_) => true, onError: (Object _) => false);
+    final clearOk = transport
+        .send(<String, Object?>{
+          'type': 'output_audio_buffer.clear',
+          'event_id': clearEventId,
+        })
+        .then((_) => true, onError: (Object _) => false);
+    final sendFailed = !(await cancelOk) || !(await clearOk);
+    if (sendFailed) {
+      await _failAndTeardown(
+        OpenAIRealtimeVoiceFailure.transport,
+        cancelActiveResponse: false,
+      );
+      return;
+    }
+    if (_mode == OpenAIRealtimeVoiceMode.singleTurn) {
+      // The one user turn is already closed → end the session. Exactly one
+      // transport close; NO second cancel/clear (cancelActiveResponse: false).
+      await (_teardown ??= _terminate(
+        OpenAIRealtimeVoicePhase.ended,
+        failure: null,
+        cancelActiveResponse: false,
+      ));
+    } else if (_active && _turnEpoch == startEpoch) {
+      // conversation: return to listening ONLY if nothing NEWER arose since the
+      // interrupt began (no new user speech, no new active response, no
+      // teardown). Otherwise leave the newer state untouched.
+      _setPhase(OpenAIRealtimeVoicePhase.listening);
+    }
+  }
 
   // ---- Teardown ----------------------------------------------------------
 
@@ -966,6 +1483,14 @@ class OpenAIRealtimeVoiceSession {
     required bool cancelActiveResponse,
   }) async {
     _active = false;
+    _recoverableCancelEventIds.clear();
+    if (!_terminating.isCompleted) {
+      // Unblock any pending recording track waiter on EVERY terminal path
+      // (including a normal singleTurn auto-close), so no Future is left
+      // pending. A value completion with no side effects — it does NOT release
+      // the transport, so recordings still finalize before the sweep.
+      _terminating.complete();
+    }
     _disarmWatchdog();
     if (phase == OpenAIRealtimeVoicePhase.ended) {
       // A graceful close shows the transient stopping phase.
@@ -974,6 +1499,17 @@ class OpenAIRealtimeVoiceSession {
     if (cancelActiveResponse && !_responseCancelSent) {
       _responseCancelSent = true;
       await _bestEffortCancelActiveResponse();
+    }
+    // Finalize recordings while the WebRTC tracks/renderers still exist and
+    // BEFORE the transport is released: any open segment is saved as the
+    // actually-recorded interrupted fragment, pending files are flushed, and the
+    // native writers are closed. A recording error is swallowed here — it never
+    // blocks teardown and never changes the terminal state/failure.
+    final recording = _recording;
+    if (recording != null) {
+      try {
+        await recording.finalizeAndClose();
+      } catch (_) {}
     }
     await _eventsSub?.cancel();
     _eventsSub = null;
@@ -1002,12 +1538,35 @@ class OpenAIRealtimeVoiceSession {
   /// releases the session.
   Future<void> dispose() async {
     _disposed = true;
+    if (!_terminating.isCompleted) {
+      // Covers dispose() before any start(): unblock a (defensive) waiter and
+      // forbid a late attach without ever leaving a Future pending.
+      _terminating.complete();
+    }
     await stop();
+    // Idempotent: covers dispose() before any start() (stop() was a no-op, so
+    // the coordinator's recorders/timers are released here) and runs before the
+    // recording streams are closed so any final flush still lands.
+    final recording = _recording;
+    if (recording != null) {
+      try {
+        await recording.finalizeAndClose();
+      } catch (_) {}
+    }
     if (!_states.isClosed) {
       await _states.close();
     }
     if (!_transcripts.isClosed) {
       await _transcripts.close();
+    }
+    if (!_assistantTranscriptDeltas.isClosed) {
+      await _assistantTranscriptDeltas.close();
+    }
+    if (!_recordings.isClosed) {
+      await _recordings.close();
+    }
+    if (!_recordingFailures.isClosed) {
+      await _recordingFailures.close();
     }
   }
 }
@@ -1029,6 +1588,9 @@ OpenAIRealtimeVoiceSession voiceSessionForTesting({
   Duration responseIdleTimeout = const Duration(seconds: 60),
   bool transcriptsEnabled = false,
   String inputTranscriptionModel = 'gpt-4o-mini-transcribe',
+  bool recordingEnabled = false,
+  String? recordingDirectoryPath,
+  RealtimeVoiceRecorderFactory? recorderFactory,
   VoiceWatchdogTimerFactory timerFactory = _defaultWatchdogTimer,
 }) => OpenAIRealtimeVoiceSession._(
   clientSecretProvider: clientSecretProvider,
@@ -1040,6 +1602,9 @@ OpenAIRealtimeVoiceSession voiceSessionForTesting({
   responseIdleTimeout: responseIdleTimeout,
   transcriptsEnabled: transcriptsEnabled,
   inputTranscriptionModel: inputTranscriptionModel,
+  recordingEnabled: recordingEnabled,
+  recordingDirectoryPath: recordingDirectoryPath,
   transportFactory: transportFactory,
   timerFactory: timerFactory,
+  recorderFactory: recorderFactory,
 );

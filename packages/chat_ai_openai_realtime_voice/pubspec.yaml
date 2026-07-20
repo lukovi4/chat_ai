@@ -38,3 +38,13 @@ dev_dependencies:
   flutter_test:
     sdk: flutter
   flutter_lints: ^6.0.0
+
+flutter:
+  plugin:
+    platforms:
+      # The OPTIONAL native audio recorder. iOS only in this increment — the
+      # package registers no Android plugin, so with recordingEnabled == false
+      # (or on Android) the voice behaviour is entirely unchanged and no native
+      # recorder code runs. No fake Android implementation is declared.
+      ios:
+        pluginClass: ChatAiRealtimeVoiceRecorderPlugin

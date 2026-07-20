@@ -31,6 +31,17 @@ abstract class RealtimeVoiceTransport {
   /// Decoded `oai-events` (JSON objects only). Broadcast; EOF on session death.
   Stream<Map<String, Object?>> get events;
 
+  /// The single local (user) audio track id, or null until it exists. Used ONLY
+  /// to attach the OPTIONAL native recording tap to the EXISTING local track —
+  /// never surfaced in state, logs or errors. No second microphone is created.
+  String? get localAudioTrackId;
+
+  /// Completes with the remote (assistant) audio track id once it arrives. Used
+  /// ONLY to attach the OPTIONAL native recording tap to the EXISTING remote
+  /// track. It may never complete (a remote track that never arrives); callers
+  /// must race it against teardown and never depend on it for lifecycle.
+  Future<String> get remoteAudioTrackId;
+
   /// One attempt: audio-only getUserMedia → peer → add local track (disabled)
   /// → `oai-events` DC → offer → one signaling POST → answer → DC open. Throws
   /// on any failure or cancellation; never retries.
@@ -108,6 +119,10 @@ class WebRtcRealtimeVoiceTransport implements RealtimeVoiceTransport {
   final StreamController<Map<String, Object?>> _events =
       StreamController<Map<String, Object?>>.broadcast();
   final Completer<bool> _opened = Completer<bool>();
+  // Completed once, in onTrack, with the remote audio track id. Deliberately
+  // never completed with an error: when recording is disabled nobody listens,
+  // and an errored future with no listener would be an unhandled Zone error.
+  final Completer<String> _remoteAudioTrackId = Completer<String>();
 
   MediaStreamTrack? _localTrack;
   RTCDataChannel? _channel;
@@ -115,6 +130,12 @@ class WebRtcRealtimeVoiceTransport implements RealtimeVoiceTransport {
 
   @override
   Stream<Map<String, Object?>> get events => _events.stream;
+
+  @override
+  String? get localAudioTrackId => _localTrack?.id;
+
+  @override
+  Future<String> get remoteAudioTrackId => _remoteAudioTrackId.future;
 
   @override
   Future<void> connect(
@@ -164,8 +185,16 @@ class WebRtcRealtimeVoiceTransport implements RealtimeVoiceTransport {
       );
       _throwIfCancelled(cancellation);
       // The remote assistant audio track auto-plays via flutter_webrtc's own
-      // engine — no renderer and no track id is needed by the session.
-      peer.onTrack = (RTCTrackEvent _) {};
+      // engine. Its id is captured ONLY so the OPTIONAL recording tap can attach
+      // to this EXISTING track; the session's audio path is otherwise unchanged.
+      peer.onTrack = (RTCTrackEvent event) {
+        if (event.track.kind == 'audio' && !_remoteAudioTrackId.isCompleted) {
+          final id = event.track.id;
+          if (id != null && id.isNotEmpty) {
+            _remoteAudioTrackId.complete(id);
+          }
+        }
+      };
       peer.onConnectionState = (RTCPeerConnectionState state) {
         switch (state) {
           case RTCPeerConnectionState.RTCPeerConnectionStateFailed:

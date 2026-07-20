@@ -46,6 +46,14 @@ dependencies:
 
   cupertino_icons: ^1.0.8
 
+  # TEST-HARNESS-ONLY: on-device playback of a finished recording file in the
+  # voice recording smoke (lib/voice_recording_smoke_main.dart) — the quick
+  # "file is playable" check. Integrated via Swift Package Manager on iOS (like
+  # the Firebase plugins). Not used by any production package; the voice package
+  # itself ships NO playback API. (Format metadata — AAC-LC/16 kHz/mono/~32 kbps —
+  # is still verified off-device with afinfo/ffprobe.)
+  audioplayers: ^6.0.0
+
 dev_dependencies:
   flutter_test:
     sdk: flutter

@@ -262,6 +262,32 @@ This smoke tests transcripts only — **audio recording and saving are not
 exercised here**; the old audio-recording feasibility probe remains a separate
 entrypoint (`lib/voice_probe_main.dart`).
 
+### Voice recording smoke
+
+A further entrypoint — `lib/voice_recording_smoke_main.dart` — physically tests
+the **production** `OpenAIRealtimeVoiceSession` with **local recording**
+(`recordingEnabled: true`, into an app-writable tmp sub-folder), **final
+transcripts** and the **assistant transcript deltas**, plus the **programmatic
+interrupt**. iOS only; no new dependency beyond a test-harness-only local audio
+player for the on-device "is it playable" check; no native code and no second
+microphone. Same `VOICE_SMOKE_MODE` (`singleTurn` | `conversation`) contract:
+
+```
+flutter run \
+  -t lib/voice_recording_smoke_main.dart \
+  --dart-define-from-file=smoke.realtime.ios.local.json \
+  --dart-define=VOICE_SMOKE_MODE=conversation
+```
+
+The minimal UI adds: an **Assistant deltas** panel (fragment count + the text
+assembled in arrival order), an **Interrupt response** button (enabled only while
+the assistant is speaking; it calls only the public `interruptResponse()`), a
+per-reply **Recordings** list (role / interrupted / whether a transcript is
+present / whether the file exists / basename, with a Play button), a
+**Directory files** list (size + Play, the no-overwrite check) and the
+**Transcripts** list. It never shows or logs the ephemeral secret, tokens,
+endpoint, SDP, raw events, the transcript text off-screen, or a full file path.
+
 ## Build without a config
 
 `flutter build ios --no-codesign` builds without any local config: with no
