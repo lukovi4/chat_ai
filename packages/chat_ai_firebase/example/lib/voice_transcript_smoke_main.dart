@@ -233,6 +233,8 @@ class _VoiceTranscriptSmokeHomeState extends State<VoiceTranscriptSmokeHome> {
     OpenAIRealtimeVoiceFailure.session => 'session',
     OpenAIRealtimeVoiceFailure.transport => 'transport',
     OpenAIRealtimeVoiceFailure.responseTimeout => 'responseTimeout',
+    OpenAIRealtimeVoiceFailure.toolLoopLimit => 'toolLoopLimit',
+    OpenAIRealtimeVoiceFailure.guardrail => 'guardrail',
   };
 
   String get _modeLabel => switch (widget.mode) {

@@ -129,7 +129,7 @@ void main() {
       final s = build(transcriptsEnabled: false);
       addTearDown(s.dispose);
       final got = <String>[];
-      s.assistantTranscriptDeltas.listen(got.add);
+      s.assistantTranscriptDeltas.listen((d) => got.add(d.delta));
       await reachListening(s, transport);
       transport.emit(_responseCreated('r1'));
       await pumpEventLoop();
@@ -144,7 +144,7 @@ void main() {
         final s = build();
         addTearDown(s.dispose);
         final got = <String>[];
-        s.assistantTranscriptDeltas.listen(got.add);
+        s.assistantTranscriptDeltas.listen((d) => got.add(d.delta));
         await reachListening(s, transport);
         transport.emit(_responseCreated('r1'));
         await pumpEventLoop();
@@ -160,7 +160,7 @@ void main() {
       final s = build();
       addTearDown(s.dispose);
       final got = <String>[];
-      s.assistantTranscriptDeltas.listen(got.add);
+      s.assistantTranscriptDeltas.listen((d) => got.add(d.delta));
       await reachListening(s, transport);
       transport.emit(_responseCreated('r1'));
       await pumpEventLoop();
@@ -174,7 +174,7 @@ void main() {
       final s = build();
       addTearDown(s.dispose);
       final got = <String>[];
-      s.assistantTranscriptDeltas.listen(got.add);
+      s.assistantTranscriptDeltas.listen((d) => got.add(d.delta));
       await reachListening(s, transport);
       transport.emit(_delta('r1', delta: 'early'));
       await pumpEventLoop();
@@ -190,7 +190,7 @@ void main() {
       final s = build();
       addTearDown(s.dispose);
       final got = <String>[];
-      s.assistantTranscriptDeltas.listen(got.add);
+      s.assistantTranscriptDeltas.listen((d) => got.add(d.delta));
       await reachListening(s, transport);
       transport.emit(_responseCreated('r1'));
       await pumpEventLoop();
@@ -206,7 +206,7 @@ void main() {
       final s = build();
       addTearDown(s.dispose);
       final got = <String>[];
-      s.assistantTranscriptDeltas.listen(got.add);
+      s.assistantTranscriptDeltas.listen((d) => got.add(d.delta));
       await reachListening(s, transport);
       transport.emit(_responseCreated('r1'));
       await pumpEventLoop();
@@ -244,7 +244,7 @@ void main() {
       final s = build();
       addTearDown(s.dispose);
       final got = <String>[];
-      s.assistantTranscriptDeltas.listen(got.add);
+      s.assistantTranscriptDeltas.listen((d) => got.add(d.delta));
       await reachListening(s, transport);
       transport.emit(_responseCreated('r1'));
       await pumpEventLoop();
@@ -261,7 +261,7 @@ void main() {
       final s = build();
       addTearDown(s.dispose);
       final got = <String>[];
-      s.assistantTranscriptDeltas.listen(got.add);
+      s.assistantTranscriptDeltas.listen((d) => got.add(d.delta));
       await reachListening(s, transport);
       transport.emit(_responseCreated('r1'));
       await pumpEventLoop();
@@ -278,7 +278,10 @@ void main() {
       final s = build();
       final got = <String>[];
       var closed = false;
-      s.assistantTranscriptDeltas.listen(got.add, onDone: () => closed = true);
+      s.assistantTranscriptDeltas.listen(
+        (d) => got.add(d.delta),
+        onDone: () => closed = true,
+      );
       await reachListening(s, transport);
       transport.emit(_responseCreated('r1'));
       await pumpEventLoop();
@@ -297,7 +300,7 @@ void main() {
         addTearDown(s.dispose);
         final deltas = <String>[];
         final finals = <OpenAIRealtimeVoiceTranscript>[];
-        s.assistantTranscriptDeltas.listen(deltas.add);
+        s.assistantTranscriptDeltas.listen((d) => deltas.add(d.delta));
         s.transcripts.listen(finals.add);
         await reachListening(s, transport);
         transport.emit(_responseCreated('r1'));
@@ -306,6 +309,9 @@ void main() {
         transport.emit(_delta('r1', delta: 'lo'));
         await pumpEventLoop();
         transport.emit(_assistantDone('r1', 'Hello'));
+        // The held final publishes once on the clean completion (not on deltas).
+        transport.emit(_responseDone('r1'));
+        transport.emit(_outputStopped('r1'));
         await pumpEventLoop();
         expect(deltas, <String>['Hel', 'lo']); // .done NOT duplicated here
         expect(finals.length, 1);
@@ -443,7 +449,7 @@ void main() {
         final s = build();
         addTearDown(s.dispose);
         final deltas = <String>[];
-        s.assistantTranscriptDeltas.listen(deltas.add);
+        s.assistantTranscriptDeltas.listen((d) => deltas.add(d.delta));
         await reachListening(s, transport);
         transport.emit(_responseCreated('r1'));
         await pumpEventLoop();
@@ -679,7 +685,7 @@ void main() {
         final s = build();
         addTearDown(s.dispose);
         final deltas = <String>[];
-        s.assistantTranscriptDeltas.listen(deltas.add);
+        s.assistantTranscriptDeltas.listen((d) => deltas.add(d.delta));
         await reachListening(s, transport);
         transport.emit(_responseCreated('r1'));
         await pumpEventLoop();
@@ -898,7 +904,7 @@ void main() {
         );
         addTearDown(s.dispose);
         final deltas = <String>[];
-        s.assistantTranscriptDeltas.listen(deltas.add);
+        s.assistantTranscriptDeltas.listen((d) => deltas.add(d.delta));
         await reachListening(s, transport);
         // r1 → interrupt(r1) → remember its cancel event id.
         transport.emit(_responseCreated('r1'));

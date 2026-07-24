@@ -77,6 +77,19 @@ enum OpenAIRealtimeVoiceFailure {
   /// The active response went idle past `responseIdleTimeout` (money-safe
   /// watchdog): one terminal failure, one best-effort cancel/clear, teardown.
   responseTimeout,
+
+  /// One logical assistant reply asked the app to run more tool legs than the
+  /// package's `maxToolTurns` cap (default 5) allows. The over-limit resolver is
+  /// never started, no `function_call_output` and no new `response.create` is
+  /// sent for it, and the session ends terminally. A money-safe bound on a
+  /// runaway tool loop — never an auto retry.
+  toolLoopLimit,
+
+  /// The optional output guardrail failed closed inside a REPLACEMENT response
+  /// (a second block or a callback exception after the one allowed replacement
+  /// was already generated). The current response is cancelled/cleared and the
+  /// session ends terminally — no second replacement is ever created.
+  guardrail,
 }
 
 /// An immutable snapshot the UI renders. No sensitive value is reachable from

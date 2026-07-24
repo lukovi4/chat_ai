@@ -288,6 +288,64 @@ present / whether the file exists / basename, with a Play button), a
 **Transcripts** list. It never shows or logs the ephemeral secret, tokens,
 endpoint, SDP, raw events, the transcript text off-screen, or a full file path.
 
+### Voice universal smoke (history / tools / guardrail, iOS only)
+
+A further entrypoint — `lib/voice_universal_smoke_main.dart` — physically tests
+the **three new universal contracts** of the production
+`OpenAIRealtimeVoiceSession`: initial **history**, universal **tools** and the
+output **guardrail**, plus the unified local `turnId`s. It uses only the public
+session API, reuses this harness's Firebase init and `SmokeClientSecretProvider`,
+adds no native code, no second microphone and no new dependency.
+
+One **compile-time scenario** per launch — **no default and no runtime switch**.
+Pass the mandatory `SMOKE_SCENARIO` define (an unknown/empty value shows the
+setup screen and creates no session). All three scenarios run with
+`transcriptsEnabled: true`, `recordingEnabled: true`, an app-writable tmp
+sub-folder, and the production defaults for model / voice / maxOutputTokens /
+idle timeout (never overridden). Scenario → mode is fixed: `history` →
+`singleTurn`; `tools` / `guardrail` → `conversation`.
+
+```
+flutter run \
+  -t lib/voice_universal_smoke_main.dart \
+  --dart-define-from-file=smoke.realtime.ios.local.json \
+  --dart-define=SMOKE_SCENARIO=history      # or: tools | guardrail
+```
+
+- **history** — seeds a small, SAFE, text-only `initialConversation`. Say
+  _"What is my favourite colour?"_; the reply should use the seeded fact (teal),
+  then the single turn ends. (Image / opaque / tool-pair history is covered by
+  unit tests, not this physical smoke.)
+- **tools** — declares one test-only tool `get_smoke_value` (a closed, empty
+  object-schema). Say _"What is the smoke value?"_; the assistant calls the tool
+  and speaks `TOOL_OK`. The resolver only counts calls and never logs the call or
+  its args. Press **Stop** when done.
+- **guardrail** — a test-only instruction makes the original reply begin with
+  `BLOCKME`; the guardrail blocks it and the safe replacement speaks `SAFE`. Say
+  _"Run the guardrail test."_; the original starts, is cut off, and exactly one
+  `guardrailEvents` event fires. Press **Stop** when done.
+
+The minimal UI shows the scenario, a coarse phase/failure, coarse counters
+(finals, recordings, tool calls, guardrail events), Start / Stop buttons and a
+plain **chronological list of the events it received** — deltas, final
+transcripts (with their diagnostic text), recordings, recording failures,
+guardrail events and tool calls. There is **no** automatic PASS/FAIL logic: each
+event line carries only a **short prefix (first 8 chars) of the local `turnId`**,
+never the full `turnId`, so a human reads the list and judges correlation with
+the checklist below. The UI never shows or logs the secret, tokens, endpoint,
+botId, provider ids, SDP, track ids or a full file path.
+
+**Manual checklist** (read the event list against the expected outcome):
+
+- **history** — the reply uses the seeded fact: it says **teal**.
+- **tools** — the `toolCalls` counter reaches exactly **1** (one `tool call`
+  event) and the spoken/`final` reply contains **`TOOL_OK`**.
+- **guardrail** — exactly **one** `guardrail` event fires; the original assistant
+  turn is reported **interrupted** (an `interrupted` `final`/`recording` line);
+  the safe replacement is a **different** short `turnId` and says **`SAFE`**.
+- **turnId linkage** — for one assistant reply, its `delta`, `final` and
+  `recording` events all show the **same short `turnId`**.
+
 ## Build without a config
 
 `flutter build ios --no-codesign` builds without any local config: with no

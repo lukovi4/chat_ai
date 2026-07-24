@@ -14,12 +14,20 @@ import 'fakes.dart';
 // Common event literals.
 Map<String, Object?> _created = <String, Object?>{'type': 'session.created'};
 Map<String, Object?> _updated = <String, Object?>{'type': 'session.updated'};
-Map<String, Object?> _speechStarted = <String, Object?>{
-  'type': 'input_audio_buffer.speech_started',
-};
-Map<String, Object?> _speechStopped = <String, Object?>{
-  'type': 'input_audio_buffer.speech_stopped',
-};
+// Full, well-formed VAD pairs (the real wire always carries item_id + the ms
+// boundary; the strict VAD-pair contract requires them).
+Map<String, Object?> _speechStarted(String itemId, {int startMs = 0}) =>
+    <String, Object?>{
+      'type': 'input_audio_buffer.speech_started',
+      'item_id': itemId,
+      'audio_start_ms': startMs,
+    };
+Map<String, Object?> _speechStopped(String itemId, {int endMs = 200}) =>
+    <String, Object?>{
+      'type': 'input_audio_buffer.speech_stopped',
+      'item_id': itemId,
+      'audio_end_ms': endMs,
+    };
 Map<String, Object?> _responseCreated(String id) => <String, Object?>{
   'type': 'response.created',
   'response': <String, Object?>{'id': id},
@@ -185,16 +193,16 @@ void main() {
     'after the first speech_stopped no second user turn is possible',
     () async {
       await reachListening(session, transport);
-      transport.emit(_speechStarted);
+      transport.emit(_speechStarted('u1'));
       await pumpEventLoop();
       expect(session.state.phase, OpenAIRealtimeVoicePhase.userSpeaking);
-      transport.emit(_speechStopped);
+      transport.emit(_speechStopped('u1'));
       await pumpEventLoop();
       // The mic was disabled on the first speech_stopped.
       expect(transport.enabledCalls, <bool>[true, false]);
       // A second turn never re-enables the mic.
-      transport.emit(_speechStarted);
-      transport.emit(_speechStopped);
+      transport.emit(_speechStarted('u2'));
+      transport.emit(_speechStopped('u2'));
       await pumpEventLoop();
       expect(transport.enabledCalls.where((e) => e).length, 1);
       expect(transport.enabledCalls.last, isFalse);
@@ -211,9 +219,9 @@ void main() {
 
       await reachListening(s, t);
       // First turn.
-      t.emit(_speechStarted);
+      t.emit(_speechStarted('u1'));
       await pumpEventLoop();
-      t.emit(_speechStopped);
+      t.emit(_speechStopped('u1'));
       await pumpEventLoop();
       // conversation NEVER disables the mic.
       expect(t.enabledCalls, <bool>[true]);
@@ -227,10 +235,10 @@ void main() {
       expect(t.closeCalls, 0);
 
       // Second turn accepted in the same conversation.
-      t.emit(_speechStarted);
+      t.emit(_speechStarted('u2'));
       await pumpEventLoop();
       expect(s.state.phase, OpenAIRealtimeVoicePhase.userSpeaking);
-      t.emit(_speechStopped);
+      t.emit(_speechStopped('u2'));
       await pumpEventLoop();
       t.emit(_responseCreated('r2'));
       await pumpEventLoop();
@@ -257,7 +265,7 @@ void main() {
       expect(s.state.phase, OpenAIRealtimeVoicePhase.assistantSpeaking);
 
       // The user barges in over the assistant's response.
-      t.emit(_speechStarted);
+      t.emit(_speechStarted('u1'));
       await pumpEventLoop();
       expect(s.state.phase, OpenAIRealtimeVoicePhase.userSpeaking);
 
@@ -571,7 +579,7 @@ void main() {
         t.emit(_responseCreated('r1'));
         await pumpEventLoop();
         // Barge-in abandons r1.
-        t.emit(_speechStarted);
+        t.emit(_speechStarted('u1'));
         await pumpEventLoop();
         expect(s.state.phase, OpenAIRealtimeVoicePhase.userSpeaking);
         // A late completed done + stopped for the abandoned r1 changes nothing.

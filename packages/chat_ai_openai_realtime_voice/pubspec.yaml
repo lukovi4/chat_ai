@@ -34,6 +34,10 @@ dependencies:
   # Firebase, no Dio, no Record_transcribe, no codegen/Freezed.
   flutter_webrtc: 1.5.2
 
+  # UUID v4 for the LOCAL per-reply turnIds (never an OpenAI id). Same major as
+  # the core `chat_ai` package uses for Message ids.
+  uuid: ^4.5.3
+
 dev_dependencies:
   flutter_test:
     sdk: flutter

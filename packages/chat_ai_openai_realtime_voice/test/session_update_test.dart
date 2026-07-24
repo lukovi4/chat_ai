@@ -1,5 +1,6 @@
 // Required test 6 (structure half): the single session.update the session ever
 // sends has the exact approved GA shape and carries the constructor values.
+import 'package:chat_ai/chat_ai.dart' show Tool;
 import 'package:chat_ai_openai_realtime_voice/src/voice_session_update.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -24,6 +25,8 @@ void main() {
     // tracing is explicitly disabled (null) — present but null.
     expect(session.containsKey('tracing'), isTrue);
     expect(session['tracing'], isNull);
+    // On a context overflow the server truncates nothing automatically.
+    expect(session['truncation'], 'disabled');
 
     final audio = session['audio']! as Map<String, Object?>;
     final input = audio['input']! as Map<String, Object?>;
@@ -39,12 +42,15 @@ void main() {
 
   test('session.update carries no unexpected top-level session keys', () {
     final session = build()['session']! as Map<String, Object?>;
+    // No tools → no tools/tool_choice/parallel_tool_calls keys; the shape is the
+    // prior no-tools payload plus the always-present truncation.
     expect(session.keys.toSet(), <String>{
       'type',
       'model',
       'output_modalities',
       'instructions',
       'max_output_tokens',
+      'truncation',
       'tracing',
       'audio',
     });
@@ -132,5 +138,56 @@ void main() {
       (input['transcription']! as Map<String, Object?>)['model'],
       'whisper-1',
     );
+  });
+
+  // Tools: an empty tools list leaves the no-tools shape unchanged (no
+  // tools/tool_choice/parallel_tool_calls keys).
+  test('empty tools add no tool keys', () {
+    final session = build()['session']! as Map<String, Object?>;
+    expect(session.containsKey('tools'), isFalse);
+    expect(session.containsKey('tool_choice'), isFalse);
+    expect(session.containsKey('parallel_tool_calls'), isFalse);
+  });
+
+  // Tools: a non-empty tools list is emitted as the exact Realtime function
+  // shape alongside tool_choice: auto and parallel_tool_calls: false.
+  test('non-empty tools emit the exact session tools payload', () {
+    final update = buildRealtimeVoiceSessionUpdate(
+      model: 'gpt-realtime-2.1',
+      voice: 'marin',
+      instructions: 'be brief',
+      maxOutputTokens: 4096,
+      tools: const <Tool>[
+        Tool(
+          name: 'get_time',
+          description: 'Return the current time.',
+          parameters: <String, dynamic>{
+            'type': 'object',
+            'properties': <String, dynamic>{
+              'tz': <String, dynamic>{'type': 'string'},
+            },
+            'required': <String>['tz'],
+            'additionalProperties': false,
+          },
+        ),
+      ],
+    );
+    final session = update['session']! as Map<String, Object?>;
+    expect(session['tool_choice'], 'auto');
+    expect(session['parallel_tool_calls'], false);
+    final tools = session['tools']! as List<Object?>;
+    expect(tools.length, 1);
+    final tool = tools.single! as Map<String, Object?>;
+    expect(tool['type'], 'function');
+    expect(tool['name'], 'get_time');
+    expect(tool['description'], 'Return the current time.');
+    expect(tool['parameters'], isA<Map<String, dynamic>>());
+    // Only the four function keys — no leakage.
+    expect(tool.keys.toSet(), <String>{
+      'type',
+      'name',
+      'description',
+      'parameters',
+    });
   });
 }

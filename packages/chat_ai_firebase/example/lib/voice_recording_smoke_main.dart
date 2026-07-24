@@ -251,7 +251,7 @@ class _VoiceRecordingSmokeHomeState extends State<VoiceRecordingSmokeHome> {
   StreamSubscription<OpenAIRealtimeVoiceRecording>? _recordingsSub;
   StreamSubscription<OpenAIRealtimeVoiceRecordingFailure>? _failuresSub;
   StreamSubscription<OpenAIRealtimeVoiceTranscript>? _transcriptsSub;
-  StreamSubscription<String>? _deltasSub;
+  StreamSubscription<OpenAIRealtimeVoiceTranscriptDelta>? _deltasSub;
 
   bool _started = false;
   bool _interrupting = false; // an interruptResponse() is in flight
@@ -284,7 +284,7 @@ class _VoiceRecordingSmokeHomeState extends State<VoiceRecordingSmokeHome> {
       // Verbatim, in order — the app assembles the displayed text itself.
       setState(() {
         _deltaCount++;
-        _deltaText += delta;
+        _deltaText += delta.delta;
       });
     });
     _recordingsSub = _session.recordings.listen((r) {
@@ -397,6 +397,8 @@ class _VoiceRecordingSmokeHomeState extends State<VoiceRecordingSmokeHome> {
     OpenAIRealtimeVoiceFailure.session => 'session',
     OpenAIRealtimeVoiceFailure.transport => 'transport',
     OpenAIRealtimeVoiceFailure.responseTimeout => 'responseTimeout',
+    OpenAIRealtimeVoiceFailure.toolLoopLimit => 'toolLoopLimit',
+    OpenAIRealtimeVoiceFailure.guardrail => 'guardrail',
   };
 
   String _roleLabel(OpenAIRealtimeVoiceRecordingRole role) => switch (role) {

@@ -609,7 +609,7 @@ void main() {
     });
 
     test(
-      'a user attach failure never blocks the mic or the assistant',
+      'a user attach failure surfaces only when a user reply begins, with its turnId',
       () async {
         final factory = FakeRecorderFactory(
           configure: (r) {
@@ -628,14 +628,39 @@ void main() {
         // The mic still went live and the session reached listening.
         expect(transport.enabledCalls.where((e) => e).length, 1);
         expect(session.state.phase, OpenAIRealtimeVoicePhase.listening);
-        // Exactly one user (attach) failure.
+        // No early, id-less failure is published before a reply exists.
+        expect(
+          failures.where(
+            (f) => f.role == OpenAIRealtimeVoiceRecordingRole.user,
+          ),
+          isEmpty,
+        );
+
+        // A concrete user reply begins → exactly one user failure, carrying a
+        // non-empty turnId.
+        transport.emit(_speechStarted('u1'));
+        await pumpEventLoop();
+        final userFailures = failures
+            .where((f) => f.role == OpenAIRealtimeVoiceRecordingRole.user)
+            .toList();
+        expect(userFailures.length, 1);
+        expect(userFailures.single.turnId, isNotEmpty);
+
+        // A second user reply never re-publishes the attach failure.
+        transport.emit(_speechStopped('u1'));
+        await pumpEventLoop();
+        transport.emit(_speechStarted('u2'));
+        await pumpEventLoop();
         expect(
           failures
               .where((f) => f.role == OpenAIRealtimeVoiceRecordingRole.user)
               .length,
           1,
         );
+
         // The assistant side is unaffected.
+        transport.emit(_speechStopped('u2'));
+        await pumpEventLoop();
         transport.emit(_responseCreated('r1'));
         transport.emit(_outputStarted('r1'));
         await pumpEventLoop();

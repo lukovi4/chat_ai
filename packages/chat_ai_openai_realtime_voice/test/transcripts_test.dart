@@ -14,13 +14,20 @@ import 'fakes.dart';
 // ---- Event literals -------------------------------------------------------
 Map<String, Object?> _created = <String, Object?>{'type': 'session.created'};
 Map<String, Object?> _updated = <String, Object?>{'type': 'session.updated'};
-Map<String, Object?> _speechStopped(String itemId) => <String, Object?>{
-  'type': 'input_audio_buffer.speech_stopped',
-  'item_id': itemId,
-};
-Map<String, Object?> _speechStarted = <String, Object?>{
-  'type': 'input_audio_buffer.speech_started',
-};
+// Full, well-formed VAD pair (the strict VAD-pair contract requires item_id +
+// the ms boundary, so transcript attribution needs a real start→stop pair).
+Map<String, Object?> _speechStarted(String itemId, {int startMs = 0}) =>
+    <String, Object?>{
+      'type': 'input_audio_buffer.speech_started',
+      'item_id': itemId,
+      'audio_start_ms': startMs,
+    };
+Map<String, Object?> _speechStopped(String itemId, {int endMs = 200}) =>
+    <String, Object?>{
+      'type': 'input_audio_buffer.speech_stopped',
+      'item_id': itemId,
+      'audio_end_ms': endMs,
+    };
 Map<String, Object?> _responseCreated(String id) => <String, Object?>{
   'type': 'response.created',
   'response': <String, Object?>{'id': id},
@@ -136,6 +143,14 @@ void main() {
     return out;
   }
 
+  // Emits one valid VAD pair (start→stop) so [itemId] becomes a known user reply.
+  Future<void> userTurn(String itemId) async {
+    transport.emit(_speechStarted(itemId));
+    await pumpEventLoop();
+    transport.emit(_speechStopped(itemId));
+    await pumpEventLoop();
+  }
+
   // ---- Required test 1 (session half) ------------------------------------
   test(
     'transcriptsEnabled false: no transcription key and events ignored',
@@ -156,7 +171,7 @@ void main() {
       expect(input.containsKey('transcription'), isFalse);
 
       // Transcript events are ignored entirely.
-      transport.emit(_speechStopped('u1'));
+      await userTurn('u1');
       transport.emit(_userCompleted('u1', 'hi'));
       transport.emit(_responseCreated('r1'));
       transport.emit(_assistantDone('r1', 'yo'));
@@ -174,8 +189,7 @@ void main() {
       final out = collect(s);
 
       await reachListening(s, transport);
-      transport.emit(_speechStopped('u1'));
-      await pumpEventLoop();
+      await userTurn('u1');
       // A delta must never surface.
       transport.emit(_userDelta('u1'));
       await pumpEventLoop();
@@ -196,8 +210,7 @@ void main() {
     final out = collect(s);
 
     await reachListening(s, transport);
-    transport.emit(_speechStopped('u1'));
-    await pumpEventLoop();
+    await userTurn('u1');
     // Never announced via speech_stopped.
     transport.emit(_userCompleted('u-foreign', 'nope'));
     await pumpEventLoop();
@@ -210,7 +223,7 @@ void main() {
     final out = collect(s);
 
     await reachListening(s, transport);
-    transport.emit(_speechStopped('u1'));
+    await userTurn('u1');
     transport.emit(_userCompleted('u1', ''));
     await pumpEventLoop();
     expect(out.length, 1);
@@ -234,11 +247,18 @@ void main() {
       await pumpEventLoop();
       expect(out, isEmpty);
 
+      // The authoritative final transcript is HELD until the reply completes
+      // cleanly (done + stopped); only then is it published interrupted:false.
       transport.emit(_assistantDone('r1', '  spoken words  '));
+      await pumpEventLoop();
+      expect(out, isEmpty);
+      transport.emit(_responseDone('r1'));
+      transport.emit(_outputStopped('r1'));
       await pumpEventLoop();
       expect(out.length, 1);
       expect(out.single.role, OpenAIRealtimeVoiceTranscriptRole.assistant);
       expect(out.single.text, '  spoken words  ');
+      expect(out.single.interrupted, isFalse);
     },
   );
 
@@ -272,7 +292,7 @@ void main() {
       final out = collect(s);
 
       await reachListening(s, transport);
-      transport.emit(_speechStopped('u1'));
+      await userTurn('u1');
       transport.emit(_responseCreated('r1'));
       await pumpEventLoop();
       expect(factory.created.length, 1);
@@ -320,7 +340,7 @@ void main() {
     final out = collect(s);
 
     await reachListening(s, transport);
-    transport.emit(_speechStopped('u1'));
+    await userTurn('u1');
     transport.emit(_responseCreated('r1'));
     await pumpEventLoop();
 
@@ -330,6 +350,9 @@ void main() {
     transport.emit(_assistantDone('r1', 'A'));
     // A duplicate done for the same response/item/indices must not emit again.
     transport.emit(_assistantDone('r1', 'A-again'));
+    // The held assistant final publishes once on the clean completion.
+    transport.emit(_responseDone('r1'));
+    transport.emit(_outputStopped('r1'));
     await pumpEventLoop();
 
     expect(out.length, 2);
@@ -351,11 +374,12 @@ void main() {
       transport.emit(_responseCreated('r1'));
       await pumpEventLoop();
       // The user barges in — the server abandons r1; we send nothing.
-      transport.emit(_speechStarted);
+      transport.emit(_speechStarted('u2'));
       await pumpEventLoop();
       expect(s.state.phase, OpenAIRealtimeVoicePhase.userSpeaking);
 
-      // A late .done for the abandoned but previously-known r1 is still emitted.
+      // A late .done for the abandoned but previously-known r1 is still emitted
+      // (interrupted:true — the response was barged in).
       transport.emit(_assistantDone('r1', 'spoken so far'));
       // A .done for a Response never created in this session is ignored.
       transport.emit(_assistantDone('r2', 'foreign'));
@@ -381,7 +405,7 @@ void main() {
       final out = collect(s);
 
       await reachListening(s, transport);
-      transport.emit(_speechStopped('u1'));
+      await userTurn('u1');
       transport.emit(_responseCreated('r1'));
       transport.emit(_assistantDone('r1', 'A'));
       transport.emit(_responseDone('r1'));
@@ -401,7 +425,7 @@ void main() {
       expect(s.state.toString().contains('super-secret-asr-detail'), isFalse);
 
       // The conversation still serves another turn.
-      transport.emit(_speechStopped('u2'));
+      await userTurn('u2');
       transport.emit(_responseCreated('r2'));
       transport.emit(_responseDone('r2'));
       transport.emit(_outputStopped('r2'));
@@ -425,7 +449,7 @@ void main() {
       final out = collect(s);
 
       await reachListening(s, transport);
-      transport.emit(_speechStopped('u1'));
+      await userTurn('u1');
       transport.emit(_responseCreated('r1'));
       transport.emit(_assistantDone('r1', 'A'));
       transport.emit(_responseDone('r1'));
@@ -458,7 +482,7 @@ void main() {
       final out = collect(s);
 
       await reachListening(s, transport);
-      transport.emit(_speechStopped('u1'));
+      await userTurn('u1');
       transport.emit(_responseCreated('r1'));
       transport.emit(_responseDone('r1'));
       transport.emit(_outputStopped('r1'));
@@ -488,7 +512,7 @@ void main() {
       final out = collect(s);
 
       await reachListening(s, transport);
-      transport.emit(_speechStopped('u1'));
+      await userTurn('u1');
       transport.emit(_responseCreated('r1'));
       transport.emit(_responseDone('r1'));
       transport.emit(_outputStopped('r1'));
@@ -572,7 +596,7 @@ void main() {
       final out = collect(s);
 
       await reachListening(s, transport);
-      transport.emit(_speechStopped('u1'));
+      await userTurn('u1');
       transport.emit(_responseCreated('r1'));
       transport.emit(_assistantDone('r1', 'A'));
       transport.emit(_responseDone('r1'));
@@ -604,7 +628,7 @@ void main() {
 
       await reachListening(s, transport);
       // First turn — no user transcript yet.
-      transport.emit(_speechStopped('u1'));
+      await userTurn('u1');
       transport.emit(_responseCreated('r1'));
       transport.emit(_responseDone('r1'));
       transport.emit(_outputStopped('r1'));
@@ -613,7 +637,7 @@ void main() {
       expect(transport.closeCalls, 0);
 
       // Second turn proceeds fully even though u1's transcript is still absent.
-      transport.emit(_speechStopped('u2'));
+      await userTurn('u2');
       transport.emit(_responseCreated('r2'));
       transport.emit(_assistantDone('r2', 'second'));
       transport.emit(_responseDone('r2'));
@@ -655,9 +679,11 @@ void main() {
       addTearDown(tSub.cancel);
 
       await reachListening(s, transport);
-      transport.emit(_speechStopped('u1'));
+      await userTurn('u1');
       transport.emit(_responseCreated('r1'));
       transport.emit(_assistantDone('r1', 'A'));
+      transport.emit(_responseDone('r1'));
+      transport.emit(_outputStopped('r1'));
       await pumpEventLoop();
       expect(out.length, 1);
 
@@ -679,4 +705,58 @@ void main() {
       expect(transport.closeCalls, 1);
     },
   );
+
+  // ---- Defect 3 (guardrail OFF): no premature interrupted:false ----------
+  group('deferred assistant final (guardrail OFF)', () {
+    OpenAIRealtimeVoiceTranscript assistantOf(
+      List<OpenAIRealtimeVoiceTranscript> l,
+    ) => l.firstWhere(
+      (t) => t.role == OpenAIRealtimeVoiceTranscriptRole.assistant,
+    );
+
+    test(
+      'a barge-in before stopped publishes the held final interrupted:true',
+      () async {
+        final s = build(mode: OpenAIRealtimeVoiceMode.conversation);
+        addTearDown(s.dispose);
+        final out = collect(s);
+        await reachListening(s, transport);
+        transport.emit(_responseCreated('r1'));
+        await pumpEventLoop();
+        // The authoritative final arrives while audio is still playing → held.
+        transport.emit(_assistantDone('r1', 'answer'));
+        await pumpEventLoop();
+        expect(
+          out.where(
+            (t) => t.role == OpenAIRealtimeVoiceTranscriptRole.assistant,
+          ),
+          isEmpty,
+        );
+        // Barge-in before output_audio_buffer.stopped.
+        transport.emit(_speechStarted('u2'));
+        await pumpEventLoop();
+        final a = assistantOf(out);
+        expect(a.text, 'answer');
+        expect(a.interrupted, isTrue);
+      },
+    );
+
+    test(
+      'interruptResponse after final but before stopped → interrupted:true',
+      () async {
+        final s = build(mode: OpenAIRealtimeVoiceMode.conversation);
+        addTearDown(s.dispose);
+        final out = collect(s);
+        await reachListening(s, transport);
+        transport.emit(_responseCreated('r1'));
+        await pumpEventLoop();
+        transport.emit(_assistantDone('r1', 'answer'));
+        await pumpEventLoop();
+        await s.interruptResponse();
+        await pumpEventLoop();
+        final a = assistantOf(out);
+        expect(a.interrupted, isTrue);
+      },
+    );
+  });
 }

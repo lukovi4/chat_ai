@@ -11,6 +11,10 @@
 //   never cancels a Response, never retries/reconnects/re-mints, and never blocks
 //   the other side;
 // - each file and each failure is emitted AT MOST ONCE;
+// - every emitted recording / failure carries the reply's LOCAL turnId; a failure
+//   is never anonymous. A side whose native tap failed to attach BEFORE any reply
+//   remembers the breakage internally and surfaces its ONE failure only once a
+//   concrete reply begins — tied to that reply's turnId, never early / id-less;
 // - after [finalizeAndClose] no further event is ever emitted;
 // - if audio is ready before its transcript, the file waits for a terminal
 //   transcript outcome bounded by the session's existing responseIdleTimeout /
@@ -41,6 +45,7 @@ class _Slot {
   _Slot({
     required this.role,
     required this.pairingKey,
+    required this.turnId,
     required this.segmentId,
   });
 
@@ -49,6 +54,10 @@ class _Slot {
   /// The internal pairing key (a user item id or an assistant response id). Kept
   /// only in memory; it never leaves the package.
   final String pairingKey;
+
+  /// The reply's LOCAL turnId (UUID v4). Carried onto the emitted recording /
+  /// failure so it correlates with the reply's transcript and deltas.
+  final String turnId;
 
   /// The opaque per-file id handed to the native writer (never an item/response
   /// id, so no provider id reaches a file name).
@@ -148,11 +157,10 @@ class VoiceRecordingCoordinator {
       try {
         await side.recorder.attach(trackId: trackId);
       } catch (_) {
+        // Remember the breakage; DO NOT emit an early, id-less failure. The one
+        // failure for this side is surfaced when its first concrete reply begins,
+        // tied to that reply's turnId (see [_begin]).
         side.broken = true;
-        if (!side.attachFailureEmitted && !_disposed) {
-          side.attachFailureEmitted = true;
-          _onFailure(OpenAIRealtimeVoiceRecordingFailure(role: side.role));
-        }
       }
     });
   }
@@ -160,8 +168,10 @@ class VoiceRecordingCoordinator {
   // ---- User segmentation (verified VAD boundaries) ------------------------
 
   /// Begins a user reply's segment. The session has already verified the
-  /// speech_started boundary (non-empty item id + non-negative audio_start_ms).
-  void beginUserSegment(String itemId) => _begin(_user, itemId);
+  /// speech_started boundary (non-empty item id + non-negative audio_start_ms)
+  /// and minted the reply's [turnId].
+  void beginUserSegment(String itemId, String turnId) =>
+      _begin(_user, itemId, turnId);
 
   /// Ends a user reply's segment on a verified speech_stopped boundary
   /// (matching item id, non-negative audio_end_ms >= audio_start_ms).
@@ -170,9 +180,9 @@ class VoiceRecordingCoordinator {
   // ---- Assistant segmentation (output-audio boundaries) -------------------
 
   /// Begins the assistant segment on output_audio_buffer.started of the active
-  /// response.
-  void beginAssistantSegment(String responseId) =>
-      _begin(_assistant, responseId);
+  /// response, tagged with the reply's [turnId].
+  void beginAssistantSegment(String responseId, String turnId) =>
+      _begin(_assistant, responseId, turnId);
 
   /// Ends the assistant segment on output_audio_buffer.stopped of the active
   /// response (a naturally completed reply).
@@ -180,12 +190,23 @@ class VoiceRecordingCoordinator {
       _end(_assistant, responseId, interrupted: false);
 
   /// Ends the assistant segment as INTERRUPTED — the actually-played fragment —
-  /// on a user barge-in over the active response.
+  /// on a user barge-in / interrupt / guardrail block over the active response.
   void interruptAssistantSegment(String responseId) =>
       _end(_assistant, responseId, interrupted: true);
 
-  void _begin(_Side? side, String pairingKey) {
-    if (side == null || side.broken || _disposed) {
+  void _begin(_Side? side, String pairingKey, String turnId) {
+    if (side == null || _disposed) {
+      return;
+    }
+    if (side.broken) {
+      // The tap never attached. Surface the ONE per-side failure now — tied to
+      // this concrete reply's turnId — then stop (a broken side cannot record).
+      if (!side.attachFailureEmitted) {
+        side.attachFailureEmitted = true;
+        _onFailure(
+          OpenAIRealtimeVoiceRecordingFailure(role: side.role, turnId: turnId),
+        );
+      }
       return;
     }
     if (side.openSlot != null) {
@@ -201,6 +222,7 @@ class VoiceRecordingCoordinator {
     final slot = _Slot(
       role: side.role,
       pairingKey: pairingKey,
+      turnId: turnId,
       segmentId: '${side.role.name}-seg-${_globalRecordingSegmentSeq++}',
     );
     slot.open = true;
@@ -289,7 +311,12 @@ class VoiceRecordingCoordinator {
     if (result == null || !result.ok || result.filePath == null) {
       // A coarse per-side failure — never waits for a transcript.
       _finishSlot(side, slot);
-      _onFailure(OpenAIRealtimeVoiceRecordingFailure(role: slot.role));
+      _onFailure(
+        OpenAIRealtimeVoiceRecordingFailure(
+          role: slot.role,
+          turnId: slot.turnId,
+        ),
+      );
       return;
     }
     if (_transcriptsEnabled && !slot.transcriptResolved && !_flushing) {
@@ -305,6 +332,7 @@ class VoiceRecordingCoordinator {
     _onRecording(
       OpenAIRealtimeVoiceRecording(
         role: slot.role,
+        turnId: slot.turnId,
         filePath: result.filePath!,
         transcript: _transcriptsEnabled ? slot.transcript : null,
         interrupted: slot.interrupted,

@@ -1,8 +1,8 @@
-// Required test 1 / 14: the public barrel exports EXACTLY the ten approved
-// declarations — the original five, the two transcript declarations and the
-// three recording declarations — no more, no less, and every export is a `show`
-// (nothing leaks). They are also referenced through the barrel import alone (no
-// `src/` import) to prove they are genuinely public.
+// Required public-API test: the barrel exports EXACTLY the fourteen approved
+// declarations — the original ten, the typed assistant transcript delta and the
+// three output-guardrail declarations — no more, no less, and every export is a
+// `show` (nothing leaks). They are also referenced through the barrel import
+// alone (no `src/` import) to prove they are genuinely public.
 import 'dart:io';
 
 import 'package:chat_ai/chat_ai.dart' show BotProfile;
@@ -17,7 +17,7 @@ class _AppSecretProvider implements ClientSecretProvider {
 }
 
 void main() {
-  test('the barrel exports exactly the ten approved declarations', () {
+  test('the barrel exports exactly the fourteen approved declarations', () {
     final source = File(
       'lib/chat_ai_openai_realtime_voice.dart',
     ).readAsStringSync();
@@ -51,16 +51,18 @@ void main() {
       'OpenAIRealtimeVoiceState',
       'OpenAIRealtimeVoiceFailure',
       'OpenAIRealtimeVoiceTranscript',
+      'OpenAIRealtimeVoiceTranscriptDelta',
       'OpenAIRealtimeVoiceTranscriptRole',
       'OpenAIRealtimeVoiceRecording',
       'OpenAIRealtimeVoiceRecordingFailure',
       'OpenAIRealtimeVoiceRecordingRole',
+      'OpenAIRealtimeVoiceGuardrailDecision',
+      'OpenAIRealtimeVoiceOutputGuardrail',
+      'OpenAIRealtimeVoiceGuardrailEvent',
     });
   });
 
   test('the exported session class exposes no `.forTesting` member', () {
-    // Regression (defect 5): the test seam must live in a package-internal
-    // top-level function, never as a member of the exported class.
     final source = File('lib/src/voice_session.dart').readAsStringSync();
     expect(
       source.contains('OpenAIRealtimeVoiceSession.forTesting'),
@@ -69,7 +71,6 @@ void main() {
           'the test seam must be a package-internal top-level function, not a '
           'constructor/member on the exported class',
     );
-    // The barrel must not re-export the internal test seam either.
     final barrel = File(
       'lib/chat_ai_openai_realtime_voice.dart',
     ).readAsStringSync();
@@ -77,32 +78,63 @@ void main() {
     expect(barrel.contains('forTesting'), isFalse);
   });
 
-  test('the seven declarations are usable through the barrel import alone', () {
-    // Types resolve.
+  test('the declarations are usable through the barrel import alone', () {
     const OpenAIRealtimeVoiceMode singleTurn =
         OpenAIRealtimeVoiceMode.singleTurn;
     const OpenAIRealtimeVoicePhase idle = OpenAIRealtimeVoicePhase.idle;
     const OpenAIRealtimeVoiceFailure mint = OpenAIRealtimeVoiceFailure.mint;
+    // The two new coarse failure categories resolve through the barrel too.
+    const OpenAIRealtimeVoiceFailure toolLimit =
+        OpenAIRealtimeVoiceFailure.toolLoopLimit;
+    const OpenAIRealtimeVoiceFailure guardrail =
+        OpenAIRealtimeVoiceFailure.guardrail;
     const OpenAIRealtimeVoiceState state = OpenAIRealtimeVoiceState.idle();
     expect(singleTurn, OpenAIRealtimeVoiceMode.singleTurn);
     expect(idle, OpenAIRealtimeVoicePhase.idle);
     expect(mint, OpenAIRealtimeVoiceFailure.mint);
+    expect(toolLimit, OpenAIRealtimeVoiceFailure.toolLoopLimit);
+    expect(guardrail, OpenAIRealtimeVoiceFailure.guardrail);
     expect(state.phase, OpenAIRealtimeVoicePhase.idle);
 
-    // The two transcript declarations resolve through the barrel too.
+    // The transcript declarations resolve through the barrel, now with turnId +
+    // interrupted, plus the typed delta.
     const OpenAIRealtimeVoiceTranscriptRole role =
         OpenAIRealtimeVoiceTranscriptRole.user;
     const OpenAIRealtimeVoiceTranscript transcript =
         OpenAIRealtimeVoiceTranscript(
           role: OpenAIRealtimeVoiceTranscriptRole.assistant,
+          turnId: 'turn-1',
           text: 'hi',
+          interrupted: false,
         );
+    const OpenAIRealtimeVoiceTranscriptDelta delta =
+        OpenAIRealtimeVoiceTranscriptDelta(turnId: 'turn-1', delta: 'h');
     expect(role, OpenAIRealtimeVoiceTranscriptRole.user);
     expect(transcript.role, OpenAIRealtimeVoiceTranscriptRole.assistant);
+    expect(transcript.turnId, 'turn-1');
     expect(transcript.text, 'hi');
+    expect(transcript.interrupted, isFalse);
+    expect(delta.turnId, 'turn-1');
+    expect(delta.delta, 'h');
 
-    // The session constructs through its public constructor, including the two
-    // opt-in transcript parameters, and exposes the transcripts stream.
+    // The guardrail declarations resolve through the barrel.
+    const OpenAIRealtimeVoiceGuardrailDecision allow =
+        OpenAIRealtimeVoiceGuardrailDecision.allow;
+    const OpenAIRealtimeVoiceGuardrailDecision block =
+        OpenAIRealtimeVoiceGuardrailDecision.block;
+    const OpenAIRealtimeVoiceGuardrailEvent event =
+        OpenAIRealtimeVoiceGuardrailEvent(turnId: 'turn-9');
+    expect(allow, OpenAIRealtimeVoiceGuardrailDecision.allow);
+    expect(block, OpenAIRealtimeVoiceGuardrailDecision.block);
+    expect(event.turnId, 'turn-9');
+    // The typedef is usable (a matching function is assignable to it).
+    Future<OpenAIRealtimeVoiceGuardrailDecision> guard({
+      required String turnId,
+      required String accumulatedText,
+    }) async => OpenAIRealtimeVoiceGuardrailDecision.allow;
+    final OpenAIRealtimeVoiceOutputGuardrail typed = guard;
+    expect(typed, isNotNull);
+
     final session = OpenAIRealtimeVoiceSession(
       clientSecretProvider: _AppSecretProvider(),
       botProfile: const BotProfile(
@@ -111,47 +143,69 @@ void main() {
         tools: <Never>[],
       ),
       transcriptsEnabled: true,
+      outputGuardrail: guard,
+      safeReplacementInstructions: 'Say only that you cannot help with that.',
     );
     expect(session.state, const OpenAIRealtimeVoiceState.idle());
     expect(session.state.phase, OpenAIRealtimeVoicePhase.idle);
     expect(session.transcripts, isA<Stream<OpenAIRealtimeVoiceTranscript>>());
-    // The two new members are reachable through the barrel with plain types
-    // (no new export/declaration): a String delta stream and a Future<void>
-    // interrupt. interruptResponse() before start() is a completed no-op.
-    expect(session.assistantTranscriptDeltas, isA<Stream<String>>());
+    // The delta stream is now TYPED (no old Stream<String>).
+    expect(
+      session.assistantTranscriptDeltas,
+      isA<Stream<OpenAIRealtimeVoiceTranscriptDelta>>(),
+    );
+    expect(
+      session.guardrailEvents,
+      isA<Stream<OpenAIRealtimeVoiceGuardrailEvent>>(),
+    );
     expect(session.interruptResponse(), isA<Future<void>>());
     session.dispose();
   });
 
-  test('the two transcript declarations have value equality', () {
+  test('the transcript / delta declarations have value equality', () {
     const a = OpenAIRealtimeVoiceTranscript(
       role: OpenAIRealtimeVoiceTranscriptRole.user,
+      turnId: 't1',
       text: 'hello',
+      interrupted: false,
     );
     const b = OpenAIRealtimeVoiceTranscript(
       role: OpenAIRealtimeVoiceTranscriptRole.user,
+      turnId: 't1',
       text: 'hello',
+      interrupted: false,
     );
     const c = OpenAIRealtimeVoiceTranscript(
       role: OpenAIRealtimeVoiceTranscriptRole.assistant,
+      turnId: 't1',
       text: 'hello',
+      interrupted: false,
     );
     expect(a, b);
     expect(a.hashCode, b.hashCode);
     expect(a == c, isFalse);
-    // toString names the role and the text LENGTH only — never the content.
+    // toString names the role/turnId/interrupted and the text LENGTH only.
     expect(a.toString().contains('hello'), isFalse);
     expect(a.toString().contains('user'), isTrue);
+    expect(a.toString().contains('t1'), isTrue);
+
+    const d1 = OpenAIRealtimeVoiceTranscriptDelta(turnId: 't1', delta: 'ab');
+    const d2 = OpenAIRealtimeVoiceTranscriptDelta(turnId: 't1', delta: 'ab');
+    const d3 = OpenAIRealtimeVoiceTranscriptDelta(turnId: 't2', delta: 'ab');
+    expect(d1, d2);
+    expect(d1.hashCode, d2.hashCode);
+    expect(d1 == d3, isFalse);
+    // The delta toString never leaks the delta content.
+    expect(d1.toString().contains('ab'), isFalse);
+    expect(d1.toString().contains('t1'), isTrue);
   });
 
-  // Required test 14 (recording half): the three recording declarations resolve
-  // through the barrel and the session exposes both recording streams, opt-in
-  // through the two new constructor parameters.
   test('the recording declarations are usable through the barrel', () {
     const OpenAIRealtimeVoiceRecordingRole userRole =
         OpenAIRealtimeVoiceRecordingRole.user;
     const OpenAIRealtimeVoiceRecording recording = OpenAIRealtimeVoiceRecording(
       role: OpenAIRealtimeVoiceRecordingRole.assistant,
+      turnId: 'turn-2',
       filePath: '/tmp/a.m4a',
       transcript: 'hi',
       interrupted: true,
@@ -159,13 +213,16 @@ void main() {
     const OpenAIRealtimeVoiceRecordingFailure failure =
         OpenAIRealtimeVoiceRecordingFailure(
           role: OpenAIRealtimeVoiceRecordingRole.user,
+          turnId: 'turn-3',
         );
     expect(userRole, OpenAIRealtimeVoiceRecordingRole.user);
     expect(recording.role, OpenAIRealtimeVoiceRecordingRole.assistant);
+    expect(recording.turnId, 'turn-2');
     expect(recording.filePath, '/tmp/a.m4a');
     expect(recording.transcript, 'hi');
     expect(recording.interrupted, isTrue);
     expect(failure.role, OpenAIRealtimeVoiceRecordingRole.user);
+    expect(failure.turnId, 'turn-3');
 
     final session = OpenAIRealtimeVoiceSession(
       clientSecretProvider: _AppSecretProvider(),
@@ -185,11 +242,10 @@ void main() {
     session.dispose();
   });
 
-  // Required test 14 (privacy half): the recording objects' toString() never
-  // leaks the file path or the transcript content.
-  test('recording toString is privacy-safe (no path, no transcript)', () {
+  test('recording/failure toString is privacy-safe (no path/transcript)', () {
     const recording = OpenAIRealtimeVoiceRecording(
       role: OpenAIRealtimeVoiceRecordingRole.user,
+      turnId: 'turn-4',
       filePath: '/private/var/secret-audio-12345.m4a',
       transcript: 'my confidential spoken words',
       interrupted: false,
@@ -199,14 +255,16 @@ void main() {
     expect(text.contains('/private/var'), isFalse);
     expect(text.contains('.m4a'), isFalse);
     expect(text.contains('confidential'), isFalse);
-    // It still exposes the coarse, safe fields.
     expect(text.contains('user'), isTrue);
     expect(text.contains('interrupted'), isTrue);
     expect(text.contains('hasTranscript'), isTrue);
+    expect(text.contains('turn-4'), isTrue);
 
     const failure = OpenAIRealtimeVoiceRecordingFailure(
       role: OpenAIRealtimeVoiceRecordingRole.assistant,
+      turnId: 'turn-5',
     );
     expect(failure.toString().contains('assistant'), isTrue);
+    expect(failure.toString().contains('turn-5'), isTrue);
   });
 }
