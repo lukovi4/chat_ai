@@ -69,6 +69,7 @@ type Tier = {
   provider: "openai" | "anthropic"; // v1: openai; anthropic reserved backlog
   model: string;
   maxOutputTokens: number;
+  reasoningEffort?: Exclude<ReasoningEffort, null>; // OpenAI SDK type
 };
 
 type EntitlementResult =
@@ -223,6 +224,12 @@ chat-replays/{uid}/{key}/{runId}.sse
 - OpenAI: **Responses API**, `store:false`, без `previous_response_id` и
   background mode; reasoning continuity возвращается через encrypted opaque
   items.
+- `reasoningEffort` — необязательная настройка server-side tier. Если она
+  задана, каждый provider request этого tier (включая каждый leg server-side
+  tool loop) получает `reasoning: { effort: <reasoningEffort> }`. Если она не
+  задана, OpenAI получает прежний request без ключа `reasoning`. Поддержка
+  конкретного значения зависит от выбранной модели (контракт OpenAI/provider
+  configuration), локальной валидации значений нет.
 - Future/backlog, не v1: Anthropic Messages adapter с сохранением
   thinking/redacted-thinking blocks.
 - `safeRelease` — закрытая per-adapter таблица: pinned OpenAI retryable
@@ -426,7 +433,7 @@ runChatReply({
   replyId,      // стабильная identity всего логического reply (владелец — app)
   request,      // уже провалидированный ChatRequest
   client,       // инжектированный OpenAI client, maxRetries: 0
-  tier,         // { model, maxOutputTokens }
+  tier,         // { model, maxOutputTokens, reasoningEffort? }
   onLegStart,   // awaited граница ПЕРЕД каждым billable provider leg
   onEvent,      // упорядоченная awaited доставка NormalizedEvent + identity
   onToolCall,   // server-side tool loop приложения

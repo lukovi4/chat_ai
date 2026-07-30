@@ -56,6 +56,21 @@ describe('OpenAI request translator — fixed invariants', () => {
   });
 });
 
+describe('OpenAI request translator — optional reasoning effort', () => {
+  it('omits the reasoning field entirely when the tier sets no effort', () => {
+    const params = buildOpenAIResponsesRequest(request([message('user', [{ type: 'text', text: 'hi' }])]), TIER);
+    expect('reasoning' in params).toBe(false);
+  });
+
+  it('maps a tier reasoningEffort to reasoning.effort', () => {
+    const params = buildOpenAIResponsesRequest(
+      request([message('user', [{ type: 'text', text: 'hi' }])]),
+      { ...TIER, reasoningEffort: 'high' },
+    );
+    expect(params.reasoning).toEqual({ effort: 'high' });
+  });
+});
+
 describe('OpenAI request translator — system + role mapping', () => {
   it('request.system leads as instructions; system Messages follow in order', () => {
     const params = buildOpenAIResponsesRequest(

@@ -88,6 +88,16 @@ describe('owner — successful done', () => {
     expect(sent.include).toEqual(['reasoning.encrypted_content']);
     expect(sent.max_output_tokens).toBe(OPENAI_TIER.maxOutputTokens);
     expect(sent.parallel_tool_calls).toBe(false);
+    // A tier without reasoningEffort keeps the previous request shape.
+    expect('reasoning' in sent).toBe(false);
+  });
+
+  it('a tier reasoningEffort reaches the actual OpenAI request', async () => {
+    const h = ownerHarness(okEvents, {
+      checkEntitlement: async () => ({ kind: 'allowed', tier: { ...OPENAI_TIER, reasoningEffort: 'high' } }),
+    });
+    await h.run();
+    expect(h.client.lastRequest!.reasoning).toEqual({ effort: 'high' });
   });
 
   it('reuses the stream translator, preserving delta order, done last, no re-batch', async () => {

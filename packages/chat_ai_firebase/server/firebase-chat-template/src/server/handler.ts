@@ -646,6 +646,7 @@ async function runOwner(
     providerRequest = buildOpenAIResponsesRequest(request, {
       model: tier.model,
       maxOutputTokens: tier.maxOutputTokens,
+      reasoningEffort: tier.reasoningEffort,
     });
   } catch {
     await ownerAdmissionExit(deps, res, uid, attemptKey, runId, { status: 502, cause: 'upstream' }, reservation, replayTtlMs);

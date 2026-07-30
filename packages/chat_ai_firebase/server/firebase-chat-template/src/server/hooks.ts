@@ -8,12 +8,21 @@
 // factory/deploy boundary (docs/server-template.md «Ownership and composition
 // boundary»).
 
-/** A resolved tier: provider + model + output cap (server config, ADR 0001). */
+import type { ReasoningEffort } from 'openai/resources/shared';
+
+/**
+ * A resolved tier: provider + model + output cap, plus an optional reasoning
+ * effort (server config, ADR 0001). `reasoningEffort` is a server-side tier
+ * setting only: when set it becomes the provider request's `reasoning.effort`;
+ * when absent the provider request carries no `reasoning` key. Which efforts a
+ * configured model supports is an OpenAI/provider-config contract.
+ */
 export type Tier = {
   id: string;
   provider: 'openai' | 'anthropic';
   model: string;
   maxOutputTokens: number;
+  reasoningEffort?: Exclude<ReasoningEffort, null>;
 };
 
 export type EntitlementResult =

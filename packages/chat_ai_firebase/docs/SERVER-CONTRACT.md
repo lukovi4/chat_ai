@@ -49,6 +49,13 @@ repeat 5xx/timeouts invisibly underneath the idempotency record.
   `include: ["reasoning.encrypted_content"]`, emits the complete opaque reasoning
   item as `provider_state`, and returns that item as input on the next matching
   OpenAI leg.
+- **`reasoningEffort` is an optional server-tier setting** (never a client
+  field). When a tier sets it, every provider request built for that tier —
+  including every leg of a server-side tool loop — carries
+  `reasoning: { effort: <reasoningEffort> }`. When the tier does not set it,
+  the request carries no `reasoning` key at all, exactly as before. Whether a
+  given effort value is supported is a property of the configured model
+  (OpenAI/provider configuration); the proxy does not validate it locally.
 - **Future/backlog reference — not v1:** Anthropic Messages API with
   `anthropic-version: 2023-06-01`. Complete `thinking` and
   `redacted_thinking` blocks (including signatures) are emitted as

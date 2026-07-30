@@ -9,18 +9,23 @@
 // `previous_response_id`, no background mode. Strict function tools.
 
 import type { Responses } from 'openai/resources';
+import type { ReasoningEffort } from 'openai/resources/shared';
 
 import { ChatRequest, WireContentPart, WireMessage } from '../../core/wire';
 import { assertValidToolset } from '../../core/tool-schema';
 
 /**
- * The resolved OpenAI tier for one leg: the concrete model and its output cap
- * (server config, ADR 0001). The full deploy-time `Tier`/entitlement hook type
- * is a later increment; the translator needs only these two fields.
+ * The resolved OpenAI tier for one leg: the concrete model, its output cap and
+ * an optional reasoning effort (server config, ADR 0001). The full deploy-time
+ * `Tier`/entitlement hook type is a later increment; the translator needs only
+ * these fields. `reasoningEffort` is passed through verbatim — whether a given
+ * effort is supported by the configured model stays an OpenAI/provider-config
+ * contract, not a local validation.
  */
 export interface ResolvedOpenAITier {
   model: string;
   maxOutputTokens: number;
+  reasoningEffort?: Exclude<ReasoningEffort, null>;
 }
 
 /**
@@ -253,6 +258,9 @@ function functionTools(request: ChatRequest): Responses.FunctionTool[] | undefin
  * chronological order and are removed from ordinary history. Ordinary
  * user/assistant Messages keep their chronological order. Client-only Message
  * fields (`id`, `status`, `createdAt`, `attemptKey`) never reach the request.
+ *
+ * `tier.reasoningEffort` maps to `reasoning: { effort }`; when it is absent the
+ * `reasoning` key is absent from the request entirely.
  */
 export function buildOpenAIResponsesRequest(
   request: ChatRequest,
@@ -289,6 +297,9 @@ export function buildOpenAIResponsesRequest(
   };
   if (tools !== undefined) {
     params.tools = tools;
+  }
+  if (tier.reasoningEffort !== undefined) {
+    params.reasoning = { effort: tier.reasoningEffort };
   }
   return params;
 }

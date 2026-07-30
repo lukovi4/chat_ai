@@ -401,6 +401,24 @@ describe('server-side tool loop', () => {
     expect(result.termination).toEqual({ kind: 'done' });
   });
 
+  it('the tier reasoning effort rides every leg of the loop', async () => {
+    const client = new FakeClient([
+      toolLeg('call_1', 'search', '{"q":"notes"}'),
+      textLeg('found 3'),
+    ]);
+    await run(client, {
+      tier: { ...TIER, reasoningEffort: 'high' },
+      request: request({ tools: [SEARCH_TOOL] }),
+      onToolCall: () => ({ content: '3 notes' }),
+    });
+
+    expect(client.requests).toHaveLength(2);
+    expect(client.requests.map((sent) => sent.reasoning)).toEqual([
+      { effort: 'high' },
+      { effort: 'high' },
+    ]);
+  });
+
   it('unknown tools, invalid arguments and handler failures are safe results', async () => {
     const scenarios: [string, LegScript, string][] = [
       ['unknown', toolLeg('call_1', 'missing', '{}'), 'unknown-tool'],
