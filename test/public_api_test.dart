@@ -130,6 +130,36 @@ void main() {
     );
   });
 
+  test(
+    'the optional durable capability is public with its exact shape',
+    () async {
+      // A backend implementing the capability is assignable to both the legacy
+      // `ChatBackend` parameter and the durable contract; the three methods have
+      // exactly the approved signatures.
+      final backend = _StubDurableBackend();
+      final ChatBackend legacy = backend;
+      expect(legacy, isA<DurableChatBackend>());
+      expect(
+        backend.startReply,
+        isA<Stream<BackendEvent> Function(String, ChatRequest)>(),
+      );
+      expect(
+        backend.attachReply,
+        isA<Future<Stream<BackendEvent>?> Function(String)>(),
+      );
+      expect(backend.cancelReply, isA<Future<void> Function(String)>());
+
+      // The async entry point: same parameters as the constructor, and with a
+      // legacy backend it is the constructor.
+      final session = await ChatSession.open(
+        backend: _StubBackend(),
+        botProfile: const BotProfile(id: 'b', systemPrompt: 's', tools: []),
+      );
+      expect(session.state, isA<Idle>());
+      await session.dispose();
+    },
+  );
+
   test('the chat widgets, ChatTheme and the §3/§7 widget contracts are '
       'public with their exact shapes', () async {
     // Enums with their closed §7 catalogues.
@@ -300,13 +330,43 @@ void main() {
     expect(barrel.contains('checkChatTheme'), isFalse);
     expect(barrel.contains('gpt_markdown'), isFalse);
 
-    // The testing entry exports exactly the scriptable fake (V1_SPEC §10) —
-    // no capture seam, and never re-exported from the main barrel.
+    // The durable extension adds exactly one public type to the barrel: the
+    // capability. The Core's durable internals stay unexported.
+    expect(
+      barrel.contains("export 'src/backend/durable_chat_backend.dart'"),
+      isTrue,
+    );
+    expect(barrel.contains('_startAttachedReply'), isFalse);
+
+    // The testing entry exports exactly the two scriptable fakes (V1_SPEC §10
+    // and its durable counterpart) — no capture seam, and never re-exported
+    // from the main barrel.
     final testing = File('lib/testing.dart').readAsStringSync();
-    expect(testing.contains('show FakeChatBackend'), isTrue);
+    expect(
+      testing.contains('show FakeChatBackend, FakeDurableChatBackend'),
+      isTrue,
+    );
     expect(testing.contains('capturedRequestsOf'), isFalse);
     expect(barrel.contains('FakeChatBackend'), isFalse);
+    expect(barrel.contains('FakeDurableChatBackend'), isFalse);
   });
+}
+
+/// A durable transport stub: the public capability is implementable from the
+/// public surface alone (this file imports no `src/` and no testing entry).
+class _StubDurableBackend implements DurableChatBackend {
+  @override
+  Stream<BackendEvent> send(ChatRequest request) => const Stream.empty();
+
+  @override
+  Stream<BackendEvent> startReply(String replyId, ChatRequest request) =>
+      const Stream.empty();
+
+  @override
+  Future<Stream<BackendEvent>?> attachReply(String replyId) async => null;
+
+  @override
+  Future<void> cancelReply(String replyId) async {}
 }
 
 /// A minimal inert transport: enough to construct a [ChatSession] through

@@ -495,6 +495,23 @@ generation runs **detached from the client connection**, tokens are written to a
 **intermediate store** (Redis / Firestore) keyed by stream id, and a reconnecting
 client reads what it missed.
 
+**Durable reply recovery is NOT this.** The package now ships two additive,
+unconnected pieces: the client-side durable reply lifecycle (`DurableChatBackend`
++ `ChatSession.open`, V1_SPEC §3/§8) and the connection-independent server
+runner (`src/runner`, see docs/server-template.md). Together they let an
+app-owned backend keep generating while no client observes it, and let a client
+re-attach to that reply afterwards. What they do **not** provide:
+
+- no `streamId`/`eventId` cursor resume — the fields of this section stay
+  reserved and unimplemented on both sides;
+- an attached reply is re-delivered from the **start of its current provider
+  leg**, not from the last event a client saw;
+- the intermediate store that makes such a re-delivery possible is the
+  **app's**; the package defines no storage, schema or wire for it.
+
+The completed-outcome replay object of §6 remains what it is: a short-lived
+terminal artefact of the HTTP handler, never a live generation store.
+
 **Firebase caveat for v2.** A bare Cloud Function's lifecycle is **tied to the
 request it serves**: it cannot keep generating for a client that is gone —
 once its response ends, background network access is reset (and per §3, the

@@ -22,6 +22,10 @@ library;
 export 'src/backend/backend_event.dart';
 export 'src/backend/chat_backend.dart';
 export 'src/backend/chat_request.dart';
+// The optional durable capability (long-running reply): declared alongside
+// the unchanged ChatBackend, used by ChatSession only when the backend
+// implements it.
+export 'src/backend/durable_chat_backend.dart';
 // The Core façade (V1_SPEC §3): the session and the checkpoint contract only —
 // the command-disposition bridge, the widgets' imageOptions bridge and the
 // internal test seam stay unexported.

@@ -25,3 +25,26 @@ export type {
 } from './hooks';
 
 export type { ChatHttpHandler, ChatHandlerRequest, ChatHandlerResponse } from './transport';
+
+// The connection-independent reply runner, re-exported for one common server
+// public surface. A detached worker should import `./runner` instead: this
+// module also pulls the Firebase-bound HTTP handler.
+export { runChatReply, ChatReplyConfigurationError } from '../runner';
+
+export type {
+  ChatReplyConfigurationErrorReason,
+  ChatReplyEventDelivery,
+  ChatReplyEventSink,
+  ChatReplyLegContext,
+  ChatReplyLegDispatch,
+  ChatReplyLegOutcome,
+  ChatReplyLegRecord,
+  ChatReplyLegStart,
+  ChatReplyResult,
+  ChatReplyTermination,
+  ChatReplyToolCall,
+  ChatReplyToolHandler,
+  ChatReplyToolResult,
+  ChatReplyUsage,
+  RunChatReplyOptions,
+} from '../runner';

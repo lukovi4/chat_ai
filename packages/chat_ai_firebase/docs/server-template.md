@@ -399,6 +399,104 @@ Firebase Admin state, contract tests подставляют stub-verifier'ы и 
 инъекции зависимостей, а не отдельный DI-framework: дополнительных интерфейсов,
 контейнеров или регистрационного слоя пакет не вводит.
 
+## Connection-independent reply runner
+
+`createChatHandler` остаётся connection-bound: его lifecycle привязан к HTTP
+request/response, disconnect клиента вызывает `AbortController.abort()`.
+Отдельно от него server template предоставляет **runner** — выполнение одного
+полного логического reply без HTTP/SSE lifecycle и без Firebase:
+
+```text
+src/runner/index.ts   ← публичный Firebase-free barrel (импортировать отсюда)
+src/runner/reply.ts   ← реализация; напрямую не импортировать
+```
+
+Runner — узкая композиция уже существующей provider-логики
+(`buildOpenAIResponsesRequest`, `translateOpenAIStream`, `classifyOpenAIError`,
+`hasZeroRetries`, `validateArgumentInstance`), а не framework. Он не импортирует
+HTTP/SSE writer, Firebase Auth/App Check, Firestore, GCS replay, smoke hooks и
+handler; он ничего не хранит, не генерирует `attemptKey`, не выполняет
+admission/quota/idempotency и не делает retry. `createChatHandler` и его
+pipeline остаются поведенчески неизменными — runner ничего в них не переписывает.
+
+Публичная поверхность (полные сигнатуры — в `src/runner/index.ts`):
+
+```ts
+runChatReply({
+  replyId,      // стабильная identity всего логического reply (владелец — app)
+  request,      // уже провалидированный ChatRequest
+  client,       // инжектированный OpenAI client, maxRetries: 0
+  tier,         // { model, maxOutputTokens }
+  onLegStart,   // awaited граница ПЕРЕД каждым billable provider leg
+  onEvent,      // упорядоченная awaited доставка NormalizedEvent + identity
+  onToolCall,   // server-side tool loop приложения
+  maxToolTurns, // default 5
+  signal,       // единственный способ отменить выполнение
+}): Promise<ChatReplyResult>
+```
+
+`ChatReplyResult` возвращает structured terminal (`done`, `provider-error` с
+`cause`/`retryAfterMs`/`disposition`, `tool-loop-limit`, `cancelled`,
+`local-error`, `sink-error`), накопленные assistant parts, per-leg записи
+(`attemptKey`, `dispatched`, outcome, точный usage) и агрегированный usage.
+Отсутствующий usage никогда не подменяется нулями: если хотя бы один
+dispatched leg не вернул точный usage, суммы равны `null` и `exact: false`.
+
+### Минимальная интеграция в app-owned worker
+
+```ts
+import { runChatReply } from './runner';
+
+const result = await runChatReply({
+  replyId,                       // из записи приложения о reply
+  request,                       // прошёл существующую wire-валидацию
+  client: openAIClient,          // ключ и клиент — приложения
+  tier: { model, maxOutputTokens },
+  signal: worker.signal,
+
+  // Единственная точка, где приложение фиксирует billable leg ДО вызова
+  // провайдера: создать/вернуть собственный attemptKey (UUID v4).
+  onLegStart: async ({ replyId, legIndex, request }) => {
+    const attemptKey = await store.beginLeg(replyId, legIndex, request);
+    return { attemptKey };
+  },
+
+  // Персистентность потока — приложения; пакет ничего не пишет.
+  onEvent: async ({ replyId, legIndex, attemptKey, event }) => {
+    await store.appendEvent(replyId, legIndex, attemptKey, event);
+  },
+
+  // Tools — приложения; пакет не поставляет ни одного.
+  onToolCall: async ({ toolCallId, name, args }) =>
+    ({ content: await app.runTool(toolCallId, name, args) }),
+});
+
+await store.finishReply(replyId, result.termination, result.parts, result.usage);
+```
+
+Правила tool loop зеркалят Dart Core: без parallel tool calls, лимит по
+`maxToolTurns` проверяется до callback и до следующего leg, имя вне declarations
+даёт `unknown-tool`, непрошедшие `validateArgumentInstance` аргументы —
+`invalid-tool-arguments`, бросок или невалидный результат callback —
+`tool-execution-failed` (текст исключения провайдеру не передаётся), повторный
+`toolCallId` переиспользует уже полученный результат.
+
+### Что принадлежит приложению
+
+- **worker host и его deployment** (процесс/сервис, где выполняется runner),
+  **persistence**, **admission**, **quota**, **idempotency** и **retry policy** —
+  всё это app-owned; пакет их не реализует и не предполагает конкретную
+  инфраструктуру;
+- **GCS replay bucket** из «Replay bucket» — короткоживущий terminal-артефакт
+  HTTP-handler'а, а **не** live generation storage: runner его не использует;
+- **smoke composition** (`src/smoke/`) — деплой-проверка, а **не** production
+  backend;
+- пакет **не поставляет durable backend implementation** для Flutter: Dart
+  `DurableChatBackend` — это контракт, который реализует приложение;
+- Dart durable capability и Node runner — **два независимых API**. Пакет не
+  вводит новый wire, который связывал бы их напрямую: как события reply
+  доходят до клиента, решает приложение.
+
 ## Деплой под новое приложение
 
 1. Firebase project приложения с Auth/App Check.

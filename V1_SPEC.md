@@ -88,6 +88,15 @@ which keeps the operation-safety matrix small. Switching conversations =
 dispose the old session, construct a new one — cheap, and idiomatic Flutter
 (create in `initState`, dispose in `dispose`).
 
+**The synchronous constructor is connection-bound, always.** It performs the
+restart normalization of §5 unconditionally and never talks to the backend;
+cancelling a subscription of a plain `ChatBackend` stays a wire-cancel. The
+optional durable reply lifecycle (a reply that keeps running remotely while no
+client observes it) is reachable ONLY through the additive async entry point
+`ChatSession.open(...)` and ONLY when the supplied backend implements the
+optional `DurableChatBackend` capability (§8). Everything else about the v1
+façade is unchanged.
+
 ```dart
 final session = ChatSession(
   backend: backend,                    // the app-supplied ChatBackend: the
@@ -180,6 +189,24 @@ Future<void> editAndResend(String messageId, String newText);
   // newText may be empty only if the Message keeps ≥1 image; otherwise no-op
 void cancel();
 Future<void> dispose();
+
+// The additive async entry point (durable extension): the SAME parameters and
+// defaults as the constructor. With a plain ChatBackend it IS the constructor.
+// With a DurableChatBackend and a persisted trailing `streaming` assistant it
+// consults `attachReply` exactly once, after every local check of the
+// constructor has passed (so invalid configuration/history never reaches the
+// transport).
+static Future<ChatSession> open({
+  required ChatBackend backend,
+  required BotProfile botProfile,
+  OnToolCall? onToolCall,
+  Conversation? history,
+  int? trimBudget,
+  int maxToolTurns = 5,
+  Duration retryDeadline = const Duration(seconds: 30),
+  ImageSendOptions imageOptions = const ImageSendOptions(),
+  ConversationCheckpoint? checkpoint,
+});
 
 Stream<ConversationState> get states;   ConversationState get state;
 Stream<String> get tokens;              Conversation get snapshot;
@@ -872,6 +899,52 @@ first leg, every tool-result leg and the one fresh-key fallback authorised by
 explicit recovery. A silent retry reuses the already-checkpointed frozen
 request and key. The callback is never overlapped with a backend dispatch for
 that leg.
+
+### The optional durable capability (additive)
+
+A transport MAY additionally implement `DurableChatBackend` — a long-running
+operation instead of a connection. `ChatBackend.send` and its semantics are
+unchanged, and a session takes this path only when the backend implements it.
+
+```dart
+abstract interface class DurableChatBackend implements ChatBackend {
+  Stream<BackendEvent> startReply(String replyId, ChatRequest request);
+    // a NEW billable leg of the logical reply; cancelling the subscription is
+    // DETACH ONLY — the remote generation keeps running
+  Future<Stream<BackendEvent>?> attachReply(String replyId);
+    // a Stream = the reply exists and its CURRENT leg is replayed from the
+    //   beginning; never a new provider call
+    // null    = the backend PROVED there is no active reply
+    // throw   = the status is unknown (never treated as null)
+  Future<void> cancelReply(String replyId);
+    // the explicit remote cancel; at most once per session
+}
+```
+
+Three identities, never mixed or reused for one another: `replyId` (the whole
+logical reply — the assistant `Message.id`, no new persisted field, schema
+stays 1), `attemptKey` (one billable leg) and `toolCallId` (one tool call).
+
+In the durable path the assistant Message is created **before** the first
+dispatch — empty, `streaming`, carrying that leg's key — and persisted by the
+existing checkpoint, so the app owns a stable reply identity before any
+provider work. It is excluded from that leg's wire (`legBaselineParts == 0`),
+so the provider-effective first leg stays identical to the legacy one. The
+tool loop stays in the Core: the next leg is `startReply` with the SAME
+`replyId` and a new checkpointed `attemptKey`.
+
+Lifecycle: a terminal/`dispose()` detaches (never a remote cancel); the user's
+`cancel()` ends the local session in `Cancelled`, keeps the partial and fires
+`cancelReply` at most once — and never at all when no leg reached the backend.
+
+Recovery (only through `ChatSession.open`): the candidate is a trailing
+`streaming` assistant Message; a returned stream keeps it `streaming`, moves
+the user Message right before it `sending → sent` and attaches without
+assembly, checkpoint, key or dispatch; `null` applies the ordinary restart
+normalization; a throw propagates untouched. The attached leg has no frozen
+request, so ANY of its outcomes — retryable causes included — is terminal for
+that session: recovery never dispatches. The package ships no durable backend
+implementation.
 
 ## 9. Server template
 

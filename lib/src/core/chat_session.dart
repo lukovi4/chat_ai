@@ -10,6 +10,7 @@ import '../backend/backend_event.dart';
 import '../backend/chat_backend.dart';
 import '../backend/chat_request.dart';
 import '../backend/chat_request_wire.dart';
+import '../backend/durable_chat_backend.dart';
 import '../models/bot_profile.dart';
 import '../models/content_part.dart';
 import '../models/conversation.dart';
@@ -124,8 +125,89 @@ class ChatSession {
          processImage: null,
        );
 
+  /// Opens one Conversation asynchronously, additionally recovering a durable
+  /// reply that is still running remotely (V1_SPEC §3, durable extension).
+  ///
+  /// Parameters and defaults are exactly those of the constructor. With a
+  /// plain [ChatBackend] this is equivalent to `ChatSession(...)`.
+  ///
+  /// With a [DurableChatBackend] and a persisted trailing `streaming`
+  /// assistant Message, `attachReply` is consulted ONCE:
+  /// - a stream — that reply is still running: it stays `streaming`, the user
+  ///   Message right before it moves `sending → sent`, and the session attaches
+  ///   to the returned stream without any assembly, checkpoint, key or
+  ///   dispatch;
+  /// - `null` — no active reply: the legacy restart normalisation applies;
+  /// - a throw — the status is unknown: the error propagates, no session is
+  ///   created, the passed [history] is not normalised and nothing is
+  ///   dispatched.
+  ///
+  /// Every local check of the constructor (numeric configuration, image
+  /// options, Bot Profile/tools/resolver, `history.schemaVersion` and the
+  /// Conversation invariants) runs BEFORE the backend is called: invalid local
+  /// configuration or history never reaches the transport.
+  static Future<ChatSession> open({
+    required ChatBackend backend,
+    required BotProfile botProfile,
+    OnToolCall? onToolCall,
+    Conversation? history,
+    int? trimBudget,
+    int maxToolTurns = 5,
+    Duration retryDeadline = const Duration(seconds: 30),
+    ImageSendOptions imageOptions = const ImageSendOptions(),
+    ConversationCheckpoint? checkpoint,
+  }) async {
+    _preflightSessionConfig(
+      botProfile: botProfile,
+      onToolCall: onToolCall,
+      history: history,
+      trimBudget: trimBudget,
+      maxToolTurns: maxToolTurns,
+      retryDeadline: retryDeadline,
+      imageOptions: imageOptions,
+    );
+    ChatSession build({String? attachedReplyId}) => ChatSession._(
+      backend: backend,
+      botProfile: botProfile,
+      onToolCall: onToolCall,
+      history: history,
+      trimBudget: trimBudget,
+      maxToolTurns: maxToolTurns,
+      retryDeadline: retryDeadline,
+      imageOptions: imageOptions,
+      checkpoint: checkpoint,
+      now: null,
+      newUuid: null,
+      delay: null,
+      random: null,
+      processImage: null,
+      preflighted: true,
+      attachedReplyId: attachedReplyId,
+    );
+
+    if (backend is! DurableChatBackend) {
+      return build();
+    }
+    final messages = history?.messages ?? const <Message>[];
+    final candidate = messages.isEmpty ? null : messages.last;
+    if (candidate == null ||
+        candidate.role != MessageRole.assistant ||
+        candidate.status != MessageStatus.streaming) {
+      return build();
+    }
+    // One atomic attempt: no separate liveness probe, so there is no
+    // "checked, then attached" race. A throw propagates untouched.
+    final attached = await backend.attachReply(candidate.id);
+    if (attached == null) {
+      return build();
+    }
+    final session = build(attachedReplyId: candidate.id);
+    session._startAttachedReply(candidate, attached);
+    return session;
+  }
+
   ChatSession._({
-    required this._backend,
+    required ChatBackend backend,
     required BotProfile botProfile,
     required this._onToolCall,
     required Conversation? history,
@@ -143,66 +225,75 @@ class ChatSession {
       ImageSendOptions options,
     )?
     processImage,
-  }) : _now = now ?? DateTime.now,
+    bool preflighted = false,
+    String? attachedReplyId,
+  }) : _backend = backend,
+       _durableBackend = backend is DurableChatBackend ? backend : null,
+       _now = now ?? DateTime.now,
        _newUuid = newUuid ?? const Uuid().v4,
        _delayOverride = delay,
        _random = random ?? Random().nextDouble,
        _processImage = processImage ?? processChatImage,
        _botProfile = botProfile {
-    _checkPositive(_maxToolTurns, 'maxToolTurns');
-    if (_retryDeadline <= Duration.zero) {
-      throw ArgumentError.value(
-        _retryDeadline,
-        'retryDeadline',
-        'must be positive',
-      );
-    }
-    final trimBudget = _trimBudget;
-    if (trimBudget != null) {
-      _checkPositive(trimBudget, 'trimBudget');
-    }
-    _checkPositive(_imageOptions.maxLongEdge, 'imageOptions.maxLongEdge');
-    _checkPositive(
-      _imageOptions.maxImagesPerMessage,
-      'imageOptions.maxImagesPerMessage',
-    );
-    if (_imageOptions.jpegQuality < 1 || _imageOptions.jpegQuality > 100) {
-      throw ArgumentError.value(
-        _imageOptions.jpegQuality,
-        'imageOptions.jpegQuality',
-        'must be within 1..100',
-      );
-    }
-    _validateProfile(botProfile);
-    if (history != null && history.schemaVersion != 1) {
-      throw ArgumentError.value(
-        history.schemaVersion,
-        'history',
-        'the v1 Core accepts Conversation schemaVersion 1 only',
+    if (!preflighted) {
+      // The one shared validation — `open()` has already run it before
+      // touching the backend, so it never runs twice for the same session.
+      _preflightSessionConfig(
+        botProfile: botProfile,
+        onToolCall: _onToolCall,
+        history: history,
+        trimBudget: _trimBudget,
+        maxToolTurns: _maxToolTurns,
+        retryDeadline: _retryDeadline,
+        imageOptions: _imageOptions,
       );
     }
 
     // Open normalisation (CONTEXT §Message Status): no in-flight status
-    // survives a restart. Then every V1_SPEC §5 invariant is checked; invalid
-    // history is never repaired beyond this normative normalisation.
-    _messages.addAll([
-      for (final message in history?.messages ?? const <Message>[])
-        switch ((message.role, message.status)) {
-          (MessageRole.user, MessageStatus.sending) => message.copyWith(
-            status: MessageStatus.failed,
-          ),
-          (MessageRole.assistant, MessageStatus.streaming) => message.copyWith(
-            status: MessageStatus.interrupted,
-          ),
-          _ => message,
-        },
-    ]);
+    // survives a restart — EXCEPT the one durable reply `open()` has just
+    // attached to: it is provably still running, so it stays `streaming` and
+    // the user Message right before it becomes `sent` (its send provably
+    // reached the provider). Then every V1_SPEC §5 invariant is checked;
+    // invalid history is never repaired beyond this normative normalisation.
+    final source = history?.messages ?? const <Message>[];
+    final attachedIndex = attachedReplyId == null
+        ? -1
+        : source.indexWhere((message) => message.id == attachedReplyId);
+    for (var i = 0; i < source.length; i++) {
+      final message = source[i];
+      if (i == attachedIndex) {
+        _messages.add(message);
+        continue;
+      }
+      if (attachedIndex > 0 &&
+          i == attachedIndex - 1 &&
+          message.role == MessageRole.user &&
+          message.status == MessageStatus.sending) {
+        _messages.add(message.copyWith(status: MessageStatus.sent));
+        continue;
+      }
+      _messages.add(switch ((message.role, message.status)) {
+        (MessageRole.user, MessageStatus.sending) => message.copyWith(
+          status: MessageStatus.failed,
+        ),
+        (MessageRole.assistant, MessageStatus.streaming) => message.copyWith(
+          status: MessageStatus.interrupted,
+        ),
+        _ => message,
+      });
+    }
     checkConversationInvariants(Conversation(messages: _messages));
   }
 
   // --- configuration --------------------------------------------------------
 
   final ChatBackend _backend;
+
+  /// The same backend when it declares the durable capability — the ONLY
+  /// switch between the v1 connection-bound path and the durable
+  /// start/attach/detach/remote-cancel path. `null` for a legacy backend.
+  final DurableChatBackend? _durableBackend;
+
   final OnToolCall? _onToolCall;
   final int? _trimBudget;
   final int _maxToolTurns;
@@ -249,6 +340,10 @@ class ChatSession {
   String? _recoveryMessageId;
 
   bool _disposed = false;
+
+  /// The durable remote cancel is a once-per-session command: an explicit
+  /// `cancel()` fires it exactly once, `dispose()` never does.
+  bool _remoteCancelSent = false;
 
   /// The private command gate (V1_SPEC §4): held from a command's synchronous
   /// start until the reply's terminal (or its no-op/rejection). While held,
@@ -376,7 +471,30 @@ class ChatSession {
     if (!_removeTechnicalAssistant(reply)) {
       _interruptAssistant(reply);
     }
+    // Durable: the ONE explicit remote cancel of this reply, fired before the
+    // terminal detaches the listener. A legacy backend keeps the plain
+    // wire-cancel of `_terminal`.
+    _requestRemoteCancel(reply);
     _terminal(const ConversationState.cancelled());
+  }
+
+  /// Fires the durable remote cancel at most once per session, and only when
+  /// this reply actually reached the backend (a `startReply` happened or an
+  /// `attachReply` succeeded). Uses the retained `replyId`, so a removed
+  /// technical assistant Message does not lose the remote reply. The Future is
+  /// tracked by the teardown chain (errors swallowed there) — a failing remote
+  /// cancel never changes the local terminal and never goes unhandled.
+  void _requestRemoteCancel(_Reply reply) {
+    final durable = _durableBackend;
+    final replyId = reply.durableReplyId;
+    if (durable == null ||
+        replyId == null ||
+        !reply.remoteStarted ||
+        _remoteCancelSent) {
+      return;
+    }
+    _remoteCancelSent = true;
+    _trackWireCancel(durable.cancelReply(replyId));
   }
 
   /// Frees the session. The returned Future completes only when the
@@ -764,11 +882,69 @@ class ChatSession {
       tools: reply.profile.tools,
       idempotencyKey: _anchorKey(reply),
     );
+    _createEarlyDurableAssistant(reply);
     if (!await _checkpointBeforeDispatch(reply)) {
       return ChatCommandDisposition.rejected;
     }
     unawaited(_driveReply(reply));
     return ChatCommandDisposition.accepted;
+  }
+
+  /// The durable reply identity (`replyId`): the assistant Message is created
+  /// EMPTY and `streaming` right after the request is frozen and BEFORE the
+  /// checkpoint that precedes the first billable dispatch, so the app owns a
+  /// stable id (and this leg's `attemptKey`) in its own storage before any
+  /// provider work. Legacy backends keep creating the assistant at the first
+  /// content event.
+  ///
+  /// The frozen request was built above, from the anchor Message's key and
+  /// without this assistant; with `legBaselineParts == 0` the reply's own
+  /// assistant is excluded from `_dispatchHistory`, so the provider-effective
+  /// first leg stays byte-identical to v1.
+  void _createEarlyDurableAssistant(_Reply reply) {
+    if (_durableBackend == null || reply.assistantId != null) {
+      return;
+    }
+    final message = Message(
+      id: _newUuid(),
+      role: MessageRole.assistant,
+      parts: const [],
+      status: MessageStatus.streaming,
+      attemptKey: reply.request!.idempotencyKey,
+      createdAt: _now(),
+    );
+    _messages.add(message);
+    reply.assistantId = message.id;
+    reply.durableReplyId = message.id;
+    reply.legBaselineParts = 0;
+    reply.earlyAssistant = true;
+  }
+
+  /// Resumes the reply `open()` attached to: no assembly, no checkpoint, no
+  /// key minting and no provider dispatch — the already-obtained stream (which
+  /// replays the current leg from its beginning) is simply consumed.
+  void _startAttachedReply(Message assistant, Stream<BackendEvent> attached) {
+    _busy = true;
+    final reply = _Reply(
+      epoch: _epoch,
+      profile: _botProfile,
+      startedAt: _now(),
+      assistantId: assistant.id,
+      assistantPreexisting: true,
+      freshKeyFallbackArmed: false,
+      legBaselineParts: _legBaseline(assistant),
+      needsLegReset: true,
+      // The loop guard survives the restart exactly as in `regenerate`: every
+      // completed tool exchange counts as a used billable tool leg.
+      toolTurnsUsed: assistant.parts.whereType<ToolResultPart>().length,
+    );
+    reply.durableReplyId = assistant.id;
+    reply.remoteStarted = true;
+    reply.attachedStream = attached;
+    _reply = reply;
+    _resetTokenStream();
+    _setState(const ConversationState.sending());
+    unawaited(_driveReply(reply));
   }
 
   /// Runs legs until the reply lands on a terminal. Every leg owns its own
@@ -819,6 +995,15 @@ class ChatSession {
           }
           continue;
         case _RequestRetry(:final cause, :final detail, :final retryAfter):
+          if (!reply.hasFrozenRequest) {
+            // The attach path has no frozen request: repeating this leg would
+            // mean assembling and dispatching a NEW provider call, which
+            // recovery must never do. Any retryable outcome of the attached
+            // leg is therefore terminal for this session; the user recovers
+            // with an explicit command.
+            _failOperational(reply, cause, detail: detail);
+            return const _LegHandled();
+          }
           // A silent retry never gets a fresh-key fallback.
           reply.freshKeyFallbackArmed = false;
           attempt++;
@@ -865,7 +1050,7 @@ class ChatSession {
   /// throws; every exit is an [_RequestOutcome], with terminals already
   /// applied.
   Future<_RequestOutcome> _consumeOneRequest(_Reply reply) async {
-    final events = StreamIterator<BackendEvent>(_backend.send(reply.request!));
+    final events = StreamIterator<BackendEvent>(_dispatchStream(reply));
     _activeEvents = events;
     try {
       while (true) {
@@ -986,6 +1171,24 @@ class ChatSession {
       // so dispose() waits for the transport teardown too.
       _trackWireCancel(events.cancel());
     }
+  }
+
+  /// The event source of one request: the attached stream `open()` already
+  /// obtained (consumed once, no backend call), the durable `startReply` of
+  /// this reply, or the legacy `send`.
+  Stream<BackendEvent> _dispatchStream(_Reply reply) {
+    final attached = reply.takeAttachedStream();
+    if (attached != null) {
+      return attached;
+    }
+    final durable = _durableBackend;
+    if (durable == null) {
+      return _backend.send(reply.request!);
+    }
+    final replyId = reply.assistantId!;
+    reply.durableReplyId = replyId;
+    reply.remoteStarted = true;
+    return durable.startReply(replyId, reply.request!);
   }
 
   // --- Tool Use Cycle -------------------------------------------------------------
@@ -1331,8 +1534,30 @@ class ChatSession {
     });
   }
 
+  /// Moves the reply's persisted key to [freshKey] (the one automatic
+  /// fresh-key fallback, V1_SPEC §6).
+  ///
+  /// On the FIRST leg of a durable reply the key is written to BOTH anchors —
+  /// the early assistant and the anchor user Message — and the checkpoint that
+  /// follows persists both before the re-dispatch: if the empty technical
+  /// assistant is later removed (pre-token failure / cancel), the fresh key
+  /// must survive on the user Message for the existing resend/recovery path.
+  /// Later tool legs (and any pre-existing assistant) keep the current
+  /// behaviour: the key lives on the assistant Message only.
   void _updateAnchorKey(_Reply reply, String freshKey) {
-    final id = reply.assistantId ?? reply.anchorUserId;
+    final anchorUserId = reply.anchorUserId;
+    if (reply.isEarlyDurableFirstLeg && anchorUserId != null) {
+      _updateMessage(
+        anchorUserId,
+        (message) => message.copyWith(attemptKey: freshKey),
+      );
+      _updateMessage(
+        reply.assistantId!,
+        (message) => message.copyWith(attemptKey: freshKey),
+      );
+      return;
+    }
+    final id = reply.assistantId ?? anchorUserId;
     if (id == null) {
       return;
     }
@@ -1637,16 +1862,8 @@ class ChatSession {
     }
   }
 
-  void _validateProfile(BotProfile profile) {
-    if (profile.tools.isNotEmpty && _onToolCall == null) {
-      throw ArgumentError.value(
-        profile,
-        'botProfile',
-        'a Bot Profile with tools requires an onToolCall resolver',
-      );
-    }
-    validateToolDeclarations(profile.tools);
-  }
+  void _validateProfile(BotProfile profile) =>
+      _validateProfileConfig(profile, _onToolCall);
 
   void _throwIfDisposed(String command) {
     if (_disposed) {
@@ -1666,17 +1883,84 @@ class ChatSession {
     }
   }
 
-  static void _checkPositive(int value, String name) {
-    if (value < 1) {
-      throw ArgumentError.value(value, name, 'must be positive');
-    }
-  }
-
   void _debugNoOp(String command, String reason) {
     assert(() {
       debugPrint('chat_ai: $command is a no-op — $reason');
       return true;
     }());
+  }
+}
+
+/// The ONE local validation of a session's configuration and history
+/// (V1_SPEC §3/§5), shared by the synchronous constructor and
+/// [ChatSession.open]. Checks run in the constructor's original order, so the
+/// thrown error of an invalid configuration is unchanged.
+///
+/// [ChatSession.open] runs it BEFORE consulting a durable backend: invalid
+/// local configuration or history never reaches the transport. The invariants
+/// are checked on the history as passed; the open normalisation only maps
+/// statuses onto other statuses that are equally legal for that role, so the
+/// verdict is the same before and after it.
+void _preflightSessionConfig({
+  required BotProfile botProfile,
+  required OnToolCall? onToolCall,
+  required Conversation? history,
+  required int? trimBudget,
+  required int maxToolTurns,
+  required Duration retryDeadline,
+  required ImageSendOptions imageOptions,
+}) {
+  _checkPositiveConfig(maxToolTurns, 'maxToolTurns');
+  if (retryDeadline <= Duration.zero) {
+    throw ArgumentError.value(
+      retryDeadline,
+      'retryDeadline',
+      'must be positive',
+    );
+  }
+  if (trimBudget != null) {
+    _checkPositiveConfig(trimBudget, 'trimBudget');
+  }
+  _checkPositiveConfig(imageOptions.maxLongEdge, 'imageOptions.maxLongEdge');
+  _checkPositiveConfig(
+    imageOptions.maxImagesPerMessage,
+    'imageOptions.maxImagesPerMessage',
+  );
+  if (imageOptions.jpegQuality < 1 || imageOptions.jpegQuality > 100) {
+    throw ArgumentError.value(
+      imageOptions.jpegQuality,
+      'imageOptions.jpegQuality',
+      'must be within 1..100',
+    );
+  }
+  _validateProfileConfig(botProfile, onToolCall);
+  if (history == null) {
+    return;
+  }
+  if (history.schemaVersion != 1) {
+    throw ArgumentError.value(
+      history.schemaVersion,
+      'history',
+      'the v1 Core accepts Conversation schemaVersion 1 only',
+    );
+  }
+  checkConversationInvariants(history);
+}
+
+void _validateProfileConfig(BotProfile profile, OnToolCall? onToolCall) {
+  if (profile.tools.isNotEmpty && onToolCall == null) {
+    throw ArgumentError.value(
+      profile,
+      'botProfile',
+      'a Bot Profile with tools requires an onToolCall resolver',
+    );
+  }
+  validateToolDeclarations(profile.tools);
+}
+
+void _checkPositiveConfig(int value, String name) {
+  if (value < 1) {
+    throw ArgumentError.value(value, name, 'must be positive');
   }
 }
 
@@ -1792,6 +2076,43 @@ class _Reply {
 
   ChatRequest? request;
   bool tokenSeenThisLeg = false;
+
+  /// The durable reply identity (the assistant `Message.id`), retained even
+  /// after a removed technical assistant clears [assistantId] — the remote
+  /// cancel still addresses the right reply.
+  String? durableReplyId;
+
+  /// Whether this reply actually reached the durable backend (a `startReply`
+  /// happened or an `attachReply` succeeded): the precondition of the one
+  /// explicit remote cancel.
+  bool remoteStarted = false;
+
+  /// True once the durable assistant Message was created BEFORE the first
+  /// dispatch (never for a pre-existing assistant of a recovery command).
+  bool earlyAssistant = false;
+
+  /// The stream `ChatSession.open()` attached to, consumed exactly once by the
+  /// first leg of a recovered reply.
+  Stream<BackendEvent>? attachedStream;
+
+  /// The attach leg carries no frozen request: a silent retry, a fresh-key
+  /// fallback or any other re-dispatch of it is impossible by contract.
+  bool get hasFrozenRequest => request != null;
+
+  /// The first leg of a durable reply whose assistant Message was created
+  /// early: the one case where the fresh-key fallback writes the key to both
+  /// the assistant and the anchor user Message.
+  bool get isEarlyDurableFirstLeg =>
+      earlyAssistant &&
+      !assistantPreexisting &&
+      toolTurnsUsed == 0 &&
+      (legBaselineParts ?? 0) == 0;
+
+  Stream<BackendEvent>? takeAttachedStream() {
+    final stream = attachedStream;
+    attachedStream = null;
+    return stream;
+  }
 
   /// Billable tool legs already used by this logical reply — pre-seeded on
   /// a recovery from the completed tool exchanges, so the loop cap survives

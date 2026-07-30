@@ -289,6 +289,8 @@ prevents that backend call.
 On reopen, the constructor normalizes stale in-flight statuses (`sending` →
 `failed`, `streaming` → `interrupted`) and validates all schema-v1 invariants.
 Unknown schema versions or malformed data fail loudly with `FormatException`.
+That normalization is unconditional for the constructor; only the optional
+durable path of section 13a can keep a still-running reply alive on reopen.
 
 `BotProfile` and `Usage` are not part of the persisted conversation. The app
 chooses the current profile when it opens the session.
@@ -508,6 +510,84 @@ fake.replayOnSameKey();
 
 An exhausted script returns a valid empty reply. The public fake deliberately
 has no matcher framework or request-inspection API.
+
+## 13a. Durable replies (optional)
+
+By default a reply is bound to the connection: cancelling the subscription is a
+wire-cancel, and a `streaming` assistant message found on reopen is stale.
+
+If — and only if — the app's backend can run a reply as a long-running remote
+operation, it may additionally implement `DurableChatBackend`. The package
+ships no such backend: the remote generation, its storage and its host are the
+app's.
+
+```dart
+class MyDurableBackend implements DurableChatBackend {
+  @override
+  Stream<BackendEvent> send(ChatRequest request) => startReply(newId(), request);
+
+  @override
+  Stream<BackendEvent> startReply(String replyId, ChatRequest request) {
+    // Start (or re-enter) one billable provider leg of `replyId` remotely and
+    // stream its normalised events. Cancelling this subscription must ONLY
+    // stop observing — never the remote generation.
+  }
+
+  @override
+  Future<Stream<BackendEvent>?> attachReply(String replyId) async {
+    // A stream: the reply is still running — replay its current leg from the
+    //   beginning, never a new provider call.
+    // null: the app PROVED there is no active reply.
+    // throw: the status is unknown (never treated as "no reply").
+  }
+
+  @override
+  Future<void> cancelReply(String replyId) async {
+    // Explicit remote cancellation of the whole logical reply.
+  }
+}
+```
+
+Open such a session through the async entry point — it has exactly the
+constructor's parameters and validates all of them locally before touching the
+backend:
+
+```dart
+final session = await ChatSession.open(
+  backend: MyDurableBackend(),
+  botProfile: profile,
+  history: restoreConversation(stored),
+  checkpoint: saveConversation,
+);
+```
+
+What changes with a durable backend:
+
+- **Identity before the first call.** The assistant `Message` is created empty
+  and `streaming` before the first dispatch, and `checkpoint` persists it. Its
+  `Message.id` IS the `replyId` the backend receives — no new persisted field,
+  `schemaVersion` stays `1`. `replyId` (whole reply), `attemptKey` (one billable
+  leg) and `toolCallId` (one tool call) stay three distinct values.
+- **Detach ≠ cancel.** A terminal and `session.dispose()` only stop observing;
+  the remote reply keeps running. `session.cancel()` ends the local session in
+  `Cancelled`, keeps the partial and calls `cancelReply` exactly once (never at
+  all if no leg reached the backend).
+- **Recovery.** `ChatSession.open` asks `attachReply` once for a persisted
+  trailing `streaming` assistant. Attached: the reply continues in `Sending`,
+  no new provider call, and the partial is replaced only when the replayed leg
+  delivers its first content. Proven absent: the usual `interrupted`
+  normalization. Unknown: the error propagates and nothing is normalized.
+- **An attached leg is not retried.** It carries no frozen request, so any
+  failure of it is terminal for that session; recovery is the user's explicit
+  `regenerate()`.
+
+Reply recovery is not SSE cursor resume: the package has no `streamId`/
+`eventId` replay, so an attached leg is re-delivered from its start.
+
+Tests use `FakeDurableChatBackend` from `package:chat_ai/testing.dart` —
+`attachReplays()` / `attachAbsent()` / `attachFails()` script the three attach
+outcomes, and `startedReplyIds`, `attachedReplyIds` and `cancelReplyCount`
+observe the lifecycle.
 
 ## 14. Lifecycle
 

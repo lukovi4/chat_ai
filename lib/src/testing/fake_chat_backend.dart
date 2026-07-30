@@ -6,6 +6,7 @@ import 'package:flutter/foundation.dart' show visibleForTesting;
 import '../backend/backend_event.dart';
 import '../backend/chat_backend.dart';
 import '../backend/chat_request.dart';
+import '../backend/durable_chat_backend.dart';
 import '../models/failure.dart';
 import '../models/tool.dart';
 import '../models/usage.dart';
@@ -95,7 +96,14 @@ class FakeChatBackend implements ChatBackend {
   @override
   Stream<BackendEvent> send(ChatRequest request) {
     _requests.add(request);
+    return _respondTo(request);
+  }
 
+  /// The scripted response of one dispatch: replay bookkeeping, script
+  /// consumption and emission — everything [send] does except capturing the
+  /// request. Shared with the durable fake, whose `attachReply` replays a leg
+  /// without any request at all.
+  Stream<BackendEvent> _respondTo(ChatRequest request) {
     final List<BackendEvent> replayed;
     final Duration tokenDelay;
     final replayable = _replayOnSameKey
@@ -126,10 +134,15 @@ class FakeChatBackend implements ChatBackend {
         );
       }
     }
+    return _emit(replayed, tokenDelay);
+  }
 
-    // Manual timer chain instead of async*: cancelling the subscription must
-    // stop a pending tokenDelay immediately (async* would finish the await
-    // first), and no timer may outlive the subscription.
+  /// Emits [replayed] as a live subscription.
+  ///
+  /// Manual timer chain instead of async*: cancelling the subscription must
+  /// stop a pending tokenDelay immediately (async* would finish the await
+  /// first), and no timer may outlive the subscription.
+  Stream<BackendEvent> _emit(List<BackendEvent> replayed, Duration tokenDelay) {
     late final StreamController<BackendEvent> controller;
     Timer? pending;
     var index = 0;
@@ -209,6 +222,100 @@ class FakeChatBackend implements ChatBackend {
     _ => value,
   };
 }
+
+/// The scriptable fake [DurableChatBackend]: the same scripted responses as
+/// [FakeChatBackend], driven through the durable long-running-reply surface.
+///
+/// It lives in this library on purpose — attach must consume the SAME private
+/// script as `send`/`startReply` without a request and without a fake `send()`
+/// call.
+///
+/// - `startReply` is a REAL dispatch: it consumes the next scripted response
+///   and captures the request, exactly like `send`;
+/// - `attachReplays()` makes the next `attachReply` return a stream that
+///   replays the next scripted response — no `send`, no captured request, no
+///   `startedReplyIds` entry;
+/// - `attachAbsent()` (the default when attach is not scripted) proves there
+///   is no active reply and returns `null`;
+/// - `attachFails()` throws — the status is unknown;
+/// - only `cancelReply` increments [cancelReplyCount]; cancelling a stream
+///   subscription is a detach and never does.
+class FakeDurableChatBackend extends FakeChatBackend
+    implements DurableChatBackend {
+  final List<String> _startedReplyIds = [];
+  final List<String> _attachedReplyIds = [];
+  final List<_FakeAttach> _attachScript = [];
+  int _cancelReplyCount = 0;
+
+  /// The next `attachReply` finds the reply and replays its current leg from
+  /// the next scripted response.
+  void attachReplays() {
+    _attachScript.add(const _FakeAttach.replays());
+  }
+
+  /// The next `attachReply` proves there is no active reply (`null`).
+  void attachAbsent() {
+    _attachScript.add(const _FakeAttach.absent());
+  }
+
+  /// The next `attachReply` cannot determine the reply status and throws.
+  void attachFails([Object error = 'attach-status-unknown']) {
+    _attachScript.add(_FakeAttach.fails(error));
+  }
+
+  /// Every `startReply` id, in dispatch order.
+  List<String> get startedReplyIds => List.unmodifiable(_startedReplyIds);
+
+  /// Every `attachReply` id, in call order.
+  List<String> get attachedReplyIds => List.unmodifiable(_attachedReplyIds);
+
+  /// Explicit remote cancels — detach never counts here.
+  int get cancelReplyCount => _cancelReplyCount;
+
+  @override
+  Stream<BackendEvent> startReply(String replyId, ChatRequest request) {
+    _startedReplyIds.add(replyId);
+    return send(request);
+  }
+
+  @override
+  Future<Stream<BackendEvent>?> attachReply(String replyId) async {
+    _attachedReplyIds.add(replyId);
+    final outcome = _attachScript.isEmpty
+        ? const _FakeAttach.absent()
+        : _attachScript.removeAt(0);
+    switch (outcome.kind) {
+      case _FakeAttachKind.absent:
+        return null;
+      case _FakeAttachKind.fails:
+        throw outcome.error!;
+      case _FakeAttachKind.replays:
+        final response = _script.isEmpty
+            ? const _FakeResponse.empty()
+            : _script.removeAt(0);
+        return _emit(response.events(this), response.tokenDelay);
+    }
+  }
+
+  @override
+  Future<void> cancelReply(String replyId) async {
+    _cancelReplyCount++;
+  }
+}
+
+/// One scripted answer of [FakeDurableChatBackend.attachReply].
+class _FakeAttach {
+  const _FakeAttach.replays() : kind = _FakeAttachKind.replays, error = null;
+
+  const _FakeAttach.absent() : kind = _FakeAttachKind.absent, error = null;
+
+  const _FakeAttach.fails(this.error) : kind = _FakeAttachKind.fails;
+
+  final _FakeAttachKind kind;
+  final Object? error;
+}
+
+enum _FakeAttachKind { replays, absent, fails }
 
 /// Package-internal scripting seam for the wire-level failure fields the
 /// public V1_SPEC §10 surface deliberately omits: a logs-only `detail` and a

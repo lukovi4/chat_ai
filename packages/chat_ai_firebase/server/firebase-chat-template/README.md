@@ -40,11 +40,17 @@ key, its own billing (ADR 0001, V1_SPEC §9, `docs/server-template.md`).
 | Replay store | `src/server/replay.ts` | Create-only private-GCS object write + finalize + byte/SHA-256 verification, replay read, release object, old-run cleanup. |
 | Provider dispatch | `src/server/openai.ts` | The exact structured safe-release allowlist and the runtime `maxRetries: 0` check. |
 | Transport | `src/server/transport.ts` | The gen2-compatible handler signature, pre-stream error replies and the SSE writer (headers + 15 s keepalive + disconnect detection). |
+| Reply runner | `src/runner/*` | `runChatReply` — one full logical reply (multi-leg, server-side tool loop, structured terminal, aggregated usage) with no HTTP/SSE lifecycle and no Firebase. See «Connection-independent reply runner» in `docs/server-template.md`. |
 
 `createChatHandler` and its dependency/hook types are exported from
 `src/server/index.ts`. This is **server-template internal API** (the composition
 boundary in `docs/server-template.md`), **not** Flutter public API and **not** a
 new wire contract.
+
+The connection-independent runner is exported from the Firebase-free barrel
+`src/runner/index.ts` (and re-exported from `src/server/index.ts`). A detached
+app-owned worker imports it from `./runner`; the worker host, persistence,
+admission and deployment around it are the application's.
 
 The one **shared normative fixture corpus** for the tool schema lives at the repo
 root, `test/contract_fixtures/tool_schema_v1/`, and is read directly by the

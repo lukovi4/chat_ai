@@ -645,6 +645,30 @@ standard — never an eternal "sending…" after a kill; the difference from a
 messenger is only that repair is a button, not automatic (a retry here costs
 money — "the one place money is spent is a deliberate act").
 
+**Legacy restart normalization vs. optional durable attach.** The rule above is
+the *legacy* one and stays the default: with an ordinary connection-bound
+backend a reply cannot outlive the process, so a `streaming` assistant message
+is necessarily stale. It applies verbatim to the synchronous constructor —
+always, whatever the backend is.
+
+A backend MAY instead run a reply as a **long-running operation** that survives
+the client (the optional durable capability). Only then, and only through the
+async `ChatSession.open`, does the Core first ask that backend — once,
+atomically — whether the persisted trailing `streaming` reply is still running:
+
+- the backend hands back a stream ⇒ the reply is genuinely still being
+  produced, so it is NOT stale: it stays `streaming`, the user message right
+  before it becomes `sent` (its send provably reached the provider), and the
+  session attaches to the running generation without a new bot call;
+- the backend proves there is no active reply ⇒ exactly the legacy
+  normalization above;
+- the backend cannot tell ⇒ nothing is normalized and the open fails, because
+  silently guessing "stale" would hide a reply the user is still paying for.
+
+Ceasing to observe such a reply (a terminal, `dispose()`) is a **detach**: the
+remote generation keeps running. Stopping it is a separate explicit command —
+the user's Cancel — which fires exactly one remote cancel.
+
 ### Content Part
 One piece of a Message's content. Product-visible kinds: **text**, **image**,
 **tool-call** (the bot asking to run a Tool) and **tool-result** (the outcome the
