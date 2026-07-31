@@ -39,6 +39,9 @@ function key(seed: string): string {
   return `${head}bcdef0-1234-4567-89ab-cdef01234567`;
 }
 
+/** The caller-owned key of leg 0 — persisted before the runner is entered. */
+const FIRST_KEY = key('0');
+
 function request(overrides: Partial<ChatRequest> = {}): ChatRequest {
   return {
     wireVersion: 1,
@@ -137,12 +140,14 @@ function run(
   client: FakeClient,
   overrides: Partial<RunChatReplyOptions> = {},
 ): Promise<ChatReplyResult> {
-  let issued = 0;
+  // Leg 0 rides FIRST_KEY; onLegStart only ever answers for the legs after it.
+  let issued = 1;
   return runChatReply({
     replyId: REPLY_ID,
     request: request(),
     client: asClient(client),
     tier: TIER,
+    firstAttemptKey: FIRST_KEY,
     onLegStart: () => ({ attemptKey: key(String(issued++)) }),
     ...overrides,
   });
@@ -221,7 +226,24 @@ describe('configuration errors happen before onLegStart and the provider', () =>
 });
 
 describe('billable leg boundary', () => {
-  it('onLegStart runs before every provider leg and its key rides the record', async () => {
+  it('the first leg rides firstAttemptKey verbatim, without onLegStart', async () => {
+    const client = new FakeClient([textLeg('hi')]);
+    let legStarts = 0;
+    const result = await run(client, {
+      firstAttemptKey: FIRST_KEY,
+      onLegStart: () => {
+        legStarts += 1;
+        return { attemptKey: key('9') };
+      },
+    });
+
+    expect(legStarts).toBe(0);
+    expect(result.legs.map((leg) => leg.attemptKey)).toEqual([FIRST_KEY]);
+    expect(result.legs[0]!.dispatched).toBe(true);
+    expect(result.termination).toEqual({ kind: 'done' });
+  });
+
+  it('onLegStart runs once before each leg after the first, and its key rides the record', async () => {
     const client = new FakeClient([
       toolLeg('call_1', 'search', '{"q":"notes"}'),
       textLeg('found'),
@@ -242,20 +264,20 @@ describe('billable leg boundary', () => {
       },
     });
 
-    // Each boundary completed BEFORE its own SDK call (the request counter is
-    // still the previous leg's).
-    expect(order).toEqual(['legStart:0:0', 'tool', 'legStart:1:1']);
+    // Leg 0 never asks; the tool leg's boundary completed BEFORE its own SDK
+    // call (the request counter is still the previous leg's).
+    expect(order).toEqual(['tool', 'legStart:1:1']);
+    expect(contexts).toHaveLength(1);
     expect(contexts[0]!.replyId).toBe(REPLY_ID);
     // The context carries the exact provider-effective request of that leg.
-    expect(contexts[0]!.request).toEqual(client.requests[0]);
-    expect(contexts[1]!.request).toEqual(client.requests[1]);
-    expect(result.legs.map((leg) => leg.attemptKey)).toEqual([key('0'), key('1')]);
+    expect(contexts[0]!.request).toEqual(client.requests[1]);
+    expect(result.legs.map((leg) => leg.attemptKey)).toEqual([FIRST_KEY, key('1')]);
     expect(result.legs.every((leg) => leg.dispatched)).toBe(true);
   });
 
-  it('an attemptKey that is not a UUID v4 never reaches the provider', async () => {
+  it('a firstAttemptKey that is not a UUID v4 never reaches the provider', async () => {
     const client = new FakeClient([textLeg('hi')]);
-    const result = await run(client, { onLegStart: () => ({ attemptKey: 'not-a-uuid' }) });
+    const result = await run(client, { firstAttemptKey: 'not-a-uuid' });
 
     expect(client.requests).toHaveLength(0);
     expect(result.termination).toMatchObject({
@@ -268,23 +290,50 @@ describe('billable leg boundary', () => {
     expect(result.usage).toEqual({ inputTokens: 0, outputTokens: 0, exact: true });
   });
 
-  it('an onLegStart throw is a local error, never an aborted leg', async () => {
-    const client = new FakeClient([textLeg('hi')]);
+  it('an onLegStart throw is a local error that stops the next provider call', async () => {
+    const client = new FakeClient([
+      toolLeg('call_1', 'search', '{"q":"notes"}'),
+      textLeg('never dispatched'),
+    ]);
     const boom = new Error('db down');
     const result = await run(client, {
+      request: request({ tools: [SEARCH_TOOL] }),
+      onToolCall: () => ({ content: '3 notes' }),
       onLegStart: () => {
         throw boom;
       },
     });
 
-    expect(client.requests).toHaveLength(0);
+    // The first leg was dispatched under firstAttemptKey; the second was not.
+    expect(client.requests).toHaveLength(1);
     expect(result.termination).toEqual({
       kind: 'local-error',
       stage: 'leg-start',
-      legIndex: 0,
+      legIndex: 1,
       disposition: 'not-dispatched',
       error: boom,
     });
+  });
+
+  it('an onLegStart key that is not a UUID v4 stops the next provider call', async () => {
+    const client = new FakeClient([
+      toolLeg('call_1', 'search', '{"q":"notes"}'),
+      textLeg('never dispatched'),
+    ]);
+    const result = await run(client, {
+      request: request({ tools: [SEARCH_TOOL] }),
+      onToolCall: () => ({ content: '3 notes' }),
+      onLegStart: () => ({ attemptKey: 'not-a-uuid' }),
+    });
+
+    expect(client.requests).toHaveLength(1);
+    expect(result.termination).toMatchObject({
+      kind: 'local-error',
+      stage: 'leg-start',
+      legIndex: 1,
+      disposition: 'not-dispatched',
+    });
+    expect(result.legs.map((leg) => leg.attemptKey)).toEqual([FIRST_KEY]);
   });
 });
 
@@ -517,11 +566,16 @@ describe('cancellation', () => {
   });
 
   it('aborting during onLegStart finishes promptly and swallows the late failure', async () => {
-    const client = new FakeClient([textLeg('hi')]);
+    const client = new FakeClient([
+      toolLeg('call_1', 'search', '{"q":"notes"}'),
+      textLeg('never dispatched'),
+    ]);
     const controller = new AbortController();
     let rejectLate: (error: unknown) => void = () => {};
 
     const result = await run(client, {
+      request: request({ tools: [SEARCH_TOOL] }),
+      onToolCall: () => ({ content: '3 notes' }),
       signal: controller.signal,
       onLegStart: () => {
         controller.abort();
@@ -532,7 +586,8 @@ describe('cancellation', () => {
     });
 
     expect(result.termination).toMatchObject({ kind: 'cancelled', disposition: 'not-dispatched' });
-    expect(client.requests).toHaveLength(0);
+    // Only the first leg (firstAttemptKey) ever reached the provider.
+    expect(client.requests).toHaveLength(1);
     // The app's promise is not cancellable: its late rejection must be
     // swallowed, never surface as an unhandled rejection.
     rejectLate(new Error('late'));
@@ -749,7 +804,7 @@ describe('usage aggregation', () => {
 
   it('reports a provable zero when nothing was dispatched', async () => {
     const client = new FakeClient([textLeg('hi')]);
-    const result = await run(client, { onLegStart: () => ({ attemptKey: 'nope' }) });
+    const result = await run(client, { firstAttemptKey: 'nope' });
 
     expect(result.legs).toHaveLength(0);
     expect(result.usage).toEqual({ inputTokens: 0, outputTokens: 0, exact: true });

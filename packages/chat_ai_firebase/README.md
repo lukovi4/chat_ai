@@ -1,9 +1,16 @@
 # chat_ai_firebase
 
-The production Firebase transport for the [`chat_ai`](../../README.md)
-package. **This package contains only the Firebase `ChatBackend`** — nothing
-else: no Core changes, no widgets. The server template and the smoke example
-ride along as companions of this transport.
+Firebase-часть кита `chat_ai`. Пакет содержит **не только** Flutter-транспорт:
+
+- **Flutter barrel** экспортирует ровно один тип — `FirebaseChatBackend`
+  (`lib/`); `chat_ai` он не реэкспортирует;
+- **server template** — deployable Firebase Functions gen2 BFF
+  (`server/firebase-chat-template/`), включая connection-independent reply
+  runner `runChatReply`;
+- **example/** — physical-device smoke harness.
+
+> **Инструкция по интеграции — одна, и она в корне репозитория:**
+> [README.md](../../README.md). Здесь только reference по этому пакету.
 
 ```dart
 import 'package:chat_ai/chat_ai.dart';
@@ -13,37 +20,42 @@ final backend = FirebaseChatBackend(url);
 final session = ChatSession(backend: backend, botProfile: profile);
 ```
 
-## What it is
+## Транспорт
 
-- `FirebaseChatBackend(url)` — one `POST` per `send()` over `dio`
-  (`ResponseType.stream`) against the deployed proxy endpoint, with the SSE
-  reply stream decoded into the core's `BackendEvent`s (V1_SPEC §8,
-  `docs/SERVER-CONTRACT.md`).
-- Every request carries `Authorization: Bearer <id-token>` (`firebase_auth`)
-  and `X-Firebase-AppCheck` (`firebase_app_check`), fetched per request.
-- The returned stream never throws: every outcome — auth rejection, HTTP
-  status, malformed body, transport break — is a `BackendEvent`.
-- Cancelling the subscription is the wire-cancel: the pending HTTP future is
-  aborted immediately and the connection is closed.
-- A dumb pipe by contract: no retry/backoff (the money-aware loop lives in
-  the core), no timeouts, no cancel endpoint.
+- `FirebaseChatBackend(url)` — один `POST` на каждый `send()` через `dio`
+  (`ResponseType.stream`) к задеплоенному endpoint'у, SSE-ответ декодируется в
+  `BackendEvent` ядра (V1_SPEC §8, `docs/SERVER-CONTRACT.md`).
+- Каждый запрос несёт `Authorization: Bearer <id-token>` (`firebase_auth`) и
+  `X-Firebase-AppCheck` (`firebase_app_check`), читаемые per request.
+- Возвращаемый stream никогда не бросает: любой исход — отказ авторизации, HTTP
+  статус, некорректное тело, обрыв — это `BackendEvent`.
+- Отмена подписки = wire-cancel: pending HTTP future прерывается немедленно,
+  соединение закрывается.
+- Транспорт **connection-bound** и по контракту «глупая труба»: без retry и
+  backoff (money-aware цикл живёт в ядре), без таймаутов и cancel-endpoint'а.
+  Durable backend'ом он **не является**.
 
-## What the app owns
+## Что принадлежит приложению
 
-- **Firebase initialization.** This package never calls
-  `Firebase.initializeApp` and does not depend on `firebase_core` directly —
-  the consuming app initializes Firebase (it arrives transitively via
-  FlutterFire).
-- **The provider key stays on the server.** The device talks only to the
-  deployed proxy (`server/firebase-chat-template/`); see ADR 0001.
+- **Инициализация Firebase.** Пакет никогда не вызывает
+  `Firebase.initializeApp` и не зависит от `firebase_core` напрямую.
+- **Provider key остаётся на сервере.** Устройство общается только с
+  задеплоенным BFF (`server/firebase-chat-template/`); см. ADR 0001.
 
-## Layout
+## Структура
 
-- `lib/` — the adapter: `FirebaseChatBackend`, the wire encoder and the SSE
-  layers (internals, not exported).
-- `server/firebase-chat-template/` — the deployable Firebase Functions proxy
-  owning the server side of `docs/SERVER-CONTRACT.md`.
-- `example/` — the physical-device smoke harness (Firebase + deployed
-  endpoint).
-- `docs/` — the server contract, the server-template guide and the
-  Firebase-specific ADRs (0001, 0006).
+- `lib/` — адаптер: `FirebaseChatBackend`, wire-энкодер и SSE-слои (внутренние,
+  не экспортируются).
+- `server/firebase-chat-template/` — deployable Firebase Functions BFF,
+  владеющий серверной стороной `docs/SERVER-CONTRACT.md`, плюс `src/runner`.
+- `example/` — physical-device smoke harness (Firebase + задеплоенный endpoint).
+- `docs/` — server/wire contracts и Firebase-специфичные ADR (0001, 0006).
+
+## Технические контракты
+
+- [SERVER-CONTRACT.md](docs/SERVER-CONTRACT.md) — wire и правила прокси.
+- [WIRE-FORMATS.md](docs/WIRE-FORMATS.md) — точные байтовые формы.
+- [server-template.md](docs/server-template.md) — ownership и композиция
+  шаблона, runner.
+- [README шаблона](server/firebase-chat-template/README.md) — конкретный
+  deployable template.

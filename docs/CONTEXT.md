@@ -95,10 +95,10 @@ needed only to keep chats **across app launches**, and that DB is the app's (any
 kind: Firestore, sqlite, files):
 1. open a chat → the **app** loads its history from its DB → hands it to the Core as
    data;
-2. the user sends → before each billable provider dispatch the Core exposes an
-   updated snapshot (including the Message and its `attemptKey`) through an
-   **awaited checkpoint** supplied by the app; an app that keeps chats across
-   launches persists that snapshot before the dispatch;
+2. the user sends → before each billable dispatch **the Core itself owns** it
+   exposes an updated snapshot (including the Message and its `attemptKey`)
+   through an **awaited checkpoint** supplied by the app; an app that keeps
+   chats across launches persists that snapshot before the dispatch;
 3. the Core streams the reply and continues exposing the current Conversation as
    **serializable data** → the **app** saves subsequent updates to its DB.
 The Package never sees the DB and has none of its own. (Same hand-off shape as
@@ -350,6 +350,11 @@ what makes a silent retry the *same* logical call instead of a second bill.
 **Resumable streaming** — resuming a broken stream from the exact token where it
 dropped, so the user returns to the **full** reply (what ChatGPT does after
 backgrounding) — is the single genuinely heavy feature here and is **v2, not v1**.
+(The optional durable attach below is NOT this: it re-delivers a running reply
+from the start of its current provider leg — or, in the server-managed mode,
+from the start of the reply's visible text — never from the last event the
+client saw. Exact `streamId`/`eventId` cursor resume stays v2 and unimplemented
+on both sides.)
 v1's "break → keep partial → user taps regenerate" is fully workable. (Deferred like
 `record_transcribe` deferred Chunking; the shape is laid so v2 drops in without
 rework — a stream id + per-event id reserved in the SSE contract.)
@@ -434,7 +439,12 @@ billable dispatch** (`attemptKey`): a user Message carries the key of its origin
 Resend after an app restart is still the *same* logical call), and an
 assistant Message carries the key of its current/last leg (updated through the
 Tool Use Cycle, so a recovery repeat targets the right leg). The Core awaits the
-Consuming App's persistence checkpoint before each provider dispatch; if an app
+Consuming App's persistence checkpoint before each billable dispatch **it owns**:
+`send` with a plain backend, `startReply` on the durable paths, and — with a
+server-managed durable backend — only the single `startReply` that carries the
+first leg's key, because the server-owned legs after it are checkpointed by the
+app on its own server (its awaited `runChatReply.onLegStart`), not here. A silent
+retry of an already-checkpointed Attempt does not checkpoint again. If an app
 persists chats across launches, providing that checkpoint is part of the storage
 contract. Within a live
 Attempt the Core freezes the assembled request and silent retries re-send it
@@ -665,9 +675,25 @@ atomically — whether the persisted trailing `streaming` reply is still running
 - the backend cannot tell ⇒ nothing is normalized and the open fails, because
   silently guessing "stale" would hide a reply the user is still paying for.
 
-Ceasing to observe such a reply (a terminal, `dispose()`) is a **detach**: the
-remote generation keeps running. Stopping it is a separate explicit command —
-the user's Cancel — which fires exactly one remote cancel.
+Ceasing to observe such a reply is a **detach**, never a remote cancel: after
+`dispose()` the remote generation may keep running, because nothing told it to
+stop. A terminal event is different in kind — `done`/`error` is the reply
+*ending*, so there is nothing left running to detach from; it too never cancels
+remotely. Stopping a still-running reply is a separate explicit command — the
+user's Cancel — which fires exactly one remote cancel **per logical reply** (the
+next reply of the same session is cancellable in turn).
+
+**Two durable modes, one of which moves the Tool Use Cycle to the server.** The
+capability a backend declares decides the owner: with `DurableChatBackend` the
+tool loop stays the Core's, and each leg is started by the Core; with
+`ServerManagedDurableChatBackend` the server owns the WHOLE logical reply —
+its tools and all its provider legs — so the Core starts it once, observes
+`accepted`/`delta`/`done`/`error` and never resolves a tool call itself.
+
+**None of this means the kit ships a running backend.** Both durable
+capabilities are *contracts*: the long-running generation, its store, its host,
+its admission/quota/idempotency and its retry policy are the app's. The package
+ships no production durable backend implementation — see README.md §11.
 
 ### Content Part
 One piece of a Message's content. Product-visible kinds: **text**, **image**,
@@ -705,7 +731,12 @@ bot streams → tool-call(name, args) → Core state: AwaitingTool
   → (more text, or another tool-call) → … → Done
 ```
 
-The bot only *asks*; the **app always executes**. Tool-call **arguments are
+The bot only *asks*; the **app always executes**. (Which side of the app runs
+the loop depends on the declared backend interface: the Core drives it for an
+ordinary `ChatBackend` and for `DurableChatBackend`, while a
+`ServerManagedDurableChatBackend` moves the whole loop to the app's server — the
+Core then never calls `onToolCall`. The rules below describe the Core-driven
+loop.) Tool-call **arguments are
 assembled and validated against the declared Tool schema on the server** (the
 proxy buffers streamed JSON fragments, which do not respect JSON boundaries, and
 emits one complete call). The Core independently refuses an unknown tool or

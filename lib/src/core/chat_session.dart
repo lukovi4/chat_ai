@@ -11,6 +11,7 @@ import '../backend/chat_backend.dart';
 import '../backend/chat_request.dart';
 import '../backend/chat_request_wire.dart';
 import '../backend/durable_chat_backend.dart';
+import '../backend/server_managed_durable_chat_backend.dart';
 import '../models/bot_profile.dart';
 import '../models/content_part.dart';
 import '../models/conversation.dart';
@@ -98,6 +99,10 @@ class ChatSession {
   /// a schema outside Chat AI Tool Schema v1), and [FormatException] when
   /// [history] violates the Conversation invariants beyond the normative
   /// stale-status normalisation.
+  ///
+  /// With a [ServerManagedDurableChatBackend] the tool loop is the server's,
+  /// so a Bot Profile with tools needs no [onToolCall]; the declarations
+  /// themselves are validated exactly as always.
   ChatSession({
     required ChatBackend backend,
     required BotProfile botProfile,
@@ -142,6 +147,11 @@ class ChatSession {
   ///   created, the passed [history] is not normalised and nothing is
   ///   dispatched.
   ///
+  /// With a [ServerManagedDurableChatBackend] the attach is the same single
+  /// call; only the replay differs by contract — it restarts the reply's
+  /// VISIBLE TEXT from the beginning, so its first delta replaces the
+  /// persisted partial as a whole.
+  ///
   /// Every local check of the constructor (numeric configuration, image
   /// options, Bot Profile/tools/resolver, `history.schemaVersion` and the
   /// Conversation invariants) runs BEFORE the backend is called: invalid local
@@ -165,6 +175,7 @@ class ChatSession {
       maxToolTurns: maxToolTurns,
       retryDeadline: retryDeadline,
       imageOptions: imageOptions,
+      serverManaged: backend is ServerManagedDurableChatBackend,
     );
     ChatSession build({String? attachedReplyId}) => ChatSession._(
       backend: backend,
@@ -229,6 +240,7 @@ class ChatSession {
     String? attachedReplyId,
   }) : _backend = backend,
        _durableBackend = backend is DurableChatBackend ? backend : null,
+       _serverManaged = backend is ServerManagedDurableChatBackend,
        _now = now ?? DateTime.now,
        _newUuid = newUuid ?? const Uuid().v4,
        _delayOverride = delay,
@@ -246,6 +258,7 @@ class ChatSession {
         maxToolTurns: _maxToolTurns,
         retryDeadline: _retryDeadline,
         imageOptions: _imageOptions,
+        serverManaged: _serverManaged,
       );
     }
 
@@ -294,6 +307,12 @@ class ChatSession {
   /// start/attach/detach/remote-cancel path. `null` for a legacy backend.
   final DurableChatBackend? _durableBackend;
 
+  /// Whether that durable backend declares the SERVER-MANAGED variant: the
+  /// server owns the whole logical reply, so `startReply` happens exactly once
+  /// and this session runs no tool loop, no silent retry, no fresh-key
+  /// fallback — it only observes, detaches and cancels.
+  final bool _serverManaged;
+
   final OnToolCall? _onToolCall;
   final int? _trimBudget;
   final int _maxToolTurns;
@@ -340,10 +359,6 @@ class ChatSession {
   String? _recoveryMessageId;
 
   bool _disposed = false;
-
-  /// The durable remote cancel is a once-per-session command: an explicit
-  /// `cancel()` fires it exactly once, `dispose()` never does.
-  bool _remoteCancelSent = false;
 
   /// The private command gate (V1_SPEC §4): held from a command's synchronous
   /// start until the reply's terminal (or its no-op/rejection). While held,
@@ -478,22 +493,24 @@ class ChatSession {
     _terminal(const ConversationState.cancelled());
   }
 
-  /// Fires the durable remote cancel at most once per session, and only when
-  /// this reply actually reached the backend (a `startReply` happened or an
-  /// `attachReply` succeeded). Uses the retained `replyId`, so a removed
-  /// technical assistant Message does not lose the remote reply. The Future is
-  /// tracked by the teardown chain (errors swallowed there) — a failing remote
-  /// cancel never changes the local terminal and never goes unhandled.
+  /// Fires the durable remote cancel at most once per LOGICAL REPLY, and only
+  /// when this reply actually reached the backend (a `startReply` happened or
+  /// an `attachReply` succeeded). Uses the retained `replyId`, so a removed
+  /// technical assistant Message does not lose the remote reply. The flag lives
+  /// on the reply, so cancelling one reply never mutes the cancel of the next
+  /// one in the same session. The Future is tracked by the teardown chain
+  /// (errors swallowed there) — a failing remote cancel never changes the local
+  /// terminal and never goes unhandled.
   void _requestRemoteCancel(_Reply reply) {
     final durable = _durableBackend;
     final replyId = reply.durableReplyId;
     if (durable == null ||
         replyId == null ||
         !reply.remoteStarted ||
-        _remoteCancelSent) {
+        reply.remoteCancelSent) {
       return;
     }
-    _remoteCancelSent = true;
+    reply.remoteCancelSent = true;
     _trackWireCancel(durable.cancelReply(replyId));
   }
 
@@ -923,6 +940,11 @@ class ChatSession {
   /// Resumes the reply `open()` attached to: no assembly, no checkpoint, no
   /// key minting and no provider dispatch — the already-obtained stream (which
   /// replays the current leg from its beginning) is simply consumed.
+  ///
+  /// A server-managed reply has no client-visible legs: its replay starts the
+  /// reply's visible text from the beginning, so the baseline is 0 (the first
+  /// delta replaces the persisted partial as a whole) and no tool leg of it
+  /// was ever the Core's.
   void _startAttachedReply(Message assistant, Stream<BackendEvent> attached) {
     _busy = true;
     final reply = _Reply(
@@ -932,11 +954,13 @@ class ChatSession {
       assistantId: assistant.id,
       assistantPreexisting: true,
       freshKeyFallbackArmed: false,
-      legBaselineParts: _legBaseline(assistant),
+      legBaselineParts: _serverManaged ? 0 : _legBaseline(assistant),
       needsLegReset: true,
       // The loop guard survives the restart exactly as in `regenerate`: every
       // completed tool exchange counts as a used billable tool leg.
-      toolTurnsUsed: assistant.parts.whereType<ToolResultPart>().length,
+      toolTurnsUsed: _serverManaged
+          ? 0
+          : assistant.parts.whereType<ToolResultPart>().length,
     );
     reply.durableReplyId = assistant.id;
     reply.remoteStarted = true;
@@ -995,12 +1019,17 @@ class ChatSession {
           }
           continue;
         case _RequestRetry(:final cause, :final detail, :final retryAfter):
-          if (!reply.hasFrozenRequest) {
+          if (!reply.hasFrozenRequest || _serverManaged) {
             // The attach path has no frozen request: repeating this leg would
             // mean assembling and dispatching a NEW provider call, which
             // recovery must never do. Any retryable outcome of the attached
             // leg is therefore terminal for this session; the user recovers
             // with an explicit command.
+            //
+            // A server-managed reply is the same by ownership: the observed
+            // failure is the outcome of the WHOLE server-owned reply, so
+            // `rate`/`overloaded`/`network` are terminal here too — the Core
+            // never re-runs someone else's reply behind the user's back.
             _failOperational(reply, cause, detail: detail);
             return const _LegHandled();
           }
@@ -1082,6 +1111,17 @@ class ChatSession {
             detail: 'missing-terminal',
           );
           return const _RequestHandled();
+        }
+        if (_serverManaged) {
+          // The server owns the whole logical reply, so only accepted / delta
+          // / done / error can legally arrive. Anything else is a backend
+          // contract violation: end the observed reply as ONE upstream
+          // failure — no resolver, no key, no second dispatch.
+          final violation = _serverManagedViolation(events.current);
+          if (violation != null) {
+            _failOperational(reply, FailureCause.upstream, detail: violation);
+            return const _RequestHandled();
+          }
         }
         switch (events.current) {
           case Accepted():
@@ -1172,6 +1212,20 @@ class ChatSession {
       _trackWireCancel(events.cancel());
     }
   }
+
+  /// The logs-only marker of an event a server-managed reply may never
+  /// deliver, or `null` when the event is one of the four legal ones.
+  ///
+  /// `provider_state` and `tool_call` are server-owned continuity the Core
+  /// must never see; `409`/`410` answer a key this session never re-uses,
+  /// because it mints no second key for a server-managed reply.
+  static String? _serverManagedViolation(BackendEvent event) => switch (event) {
+    ProviderStateEvent() => 'server-managed-provider-state',
+    ToolCallEvent() => 'server-managed-tool-call',
+    ConflictEvent() => 'server-managed-conflict',
+    GoneEvent() => 'server-managed-gone',
+    _ => null,
+  };
 
   /// The event source of one request: the attached stream `open()` already
   /// obtained (consumed once, no backend call), the durable `startReply` of
@@ -1862,8 +1916,11 @@ class ChatSession {
     }
   }
 
-  void _validateProfile(BotProfile profile) =>
-      _validateProfileConfig(profile, _onToolCall);
+  void _validateProfile(BotProfile profile) => _validateProfileConfig(
+    profile,
+    _onToolCall,
+    serverManaged: _serverManaged,
+  );
 
   void _throwIfDisposed(String command) {
     if (_disposed) {
@@ -1909,6 +1966,7 @@ void _preflightSessionConfig({
   required int maxToolTurns,
   required Duration retryDeadline,
   required ImageSendOptions imageOptions,
+  required bool serverManaged,
 }) {
   _checkPositiveConfig(maxToolTurns, 'maxToolTurns');
   if (retryDeadline <= Duration.zero) {
@@ -1933,7 +1991,7 @@ void _preflightSessionConfig({
       'must be within 1..100',
     );
   }
-  _validateProfileConfig(botProfile, onToolCall);
+  _validateProfileConfig(botProfile, onToolCall, serverManaged: serverManaged);
   if (history == null) {
     return;
   }
@@ -1947,8 +2005,16 @@ void _preflightSessionConfig({
   checkConversationInvariants(history);
 }
 
-void _validateProfileConfig(BotProfile profile, OnToolCall? onToolCall) {
-  if (profile.tools.isNotEmpty && onToolCall == null) {
+/// [serverManaged] relaxes exactly ONE guard: with a
+/// [ServerManagedDurableChatBackend] the tool loop is the server's, so tools
+/// without a client resolver are a legal configuration. The declarations
+/// themselves are validated identically in both modes.
+void _validateProfileConfig(
+  BotProfile profile,
+  OnToolCall? onToolCall, {
+  required bool serverManaged,
+}) {
+  if (profile.tools.isNotEmpty && onToolCall == null && !serverManaged) {
     throw ArgumentError.value(
       profile,
       'botProfile',
@@ -2086,6 +2152,11 @@ class _Reply {
   /// happened or an `attachReply` succeeded): the precondition of the one
   /// explicit remote cancel.
   bool remoteStarted = false;
+
+  /// Whether the ONE explicit remote cancel of THIS logical reply already
+  /// fired: a repeated `cancel()` adds nothing, and the next reply of the same
+  /// session starts with its own flag.
+  bool remoteCancelSent = false;
 
   /// True once the durable assistant Message was created BEFORE the first
   /// dispatch (never for a pre-existing assistant of a recovery command).

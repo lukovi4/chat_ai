@@ -41,7 +41,8 @@ abstract interface class DurableChatBackend implements ChatBackend {
 
   /// Explicit best-effort remote cancellation of the logical reply.
   ///
-  /// Within one `ChatSession` the Core calls this at most once, and only after
-  /// a `startReply` actually happened or an `attachReply` succeeded.
+  /// The Core calls this at most once per LOGICAL REPLY, and only after a
+  /// `startReply` actually happened or an `attachReply` succeeded; a later
+  /// reply of the same `ChatSession` can be cancelled in turn.
   Future<void> cancelReply(String replyId);
 }

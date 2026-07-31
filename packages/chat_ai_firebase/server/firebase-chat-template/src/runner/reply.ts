@@ -10,8 +10,10 @@
 // Ownership boundary (docs/server-template.md): persistence, admission, quota,
 // idempotency, the worker host and its deployment belong to the APPLICATION.
 // The runner keeps no state beyond one call, mints no `attemptKey`, retries
-// nothing and stores nothing. `onLegStart` is the app's persistence boundary:
-// it is awaited before EVERY provider dispatch, so no billable leg is hidden.
+// nothing and stores nothing. The app owns every billable leg's key: the FIRST
+// leg uses the `firstAttemptKey` the caller had already persisted before the
+// runner was entered, and `onLegStart` is awaited before every FOLLOWING
+// provider dispatch — so no billable leg is hidden.
 //
 // Three identities, never mixed: `replyId` (the whole logical reply, minted by
 // the caller), `attemptKey` (one billable provider leg, minted by the app in
@@ -61,7 +63,10 @@ export class ChatReplyConfigurationError extends Error {
 /** What the app is told before one billable provider leg is dispatched. */
 export interface ChatReplyLegContext {
   readonly replyId: string;
-  /** Zero-based index of this provider leg inside the logical reply. */
+  /**
+   * Zero-based index of this provider leg inside the logical reply. Always
+   * `>= 1`: leg 0 runs under the caller's `firstAttemptKey`.
+   */
   readonly legIndex: number;
   /** The exact provider-effective SDK request of this leg. */
   readonly request: Responses.ResponseCreateParamsStreaming;
@@ -74,8 +79,10 @@ export interface ChatReplyLegDispatch {
 
 /**
  * The app-owned persistence boundary, awaited before every
- * `client.responses.create`. The package neither generates nor stores the
- * returned key and runs no admission/quota/idempotency of its own.
+ * `client.responses.create` EXCEPT the first one — that leg's key is the
+ * caller's `firstAttemptKey`, already persisted before the runner was entered.
+ * The package neither generates nor stores the returned key and runs no
+ * admission/quota/idempotency of its own.
  */
 export type ChatReplyLegStart = (
   leg: ChatReplyLegContext,
@@ -121,6 +128,13 @@ export interface RunChatReplyOptions {
   readonly request: ChatRequest;
   readonly client: OpenAI;
   readonly tier: ResolvedOpenAITier;
+  /**
+   * The key of the FIRST provider leg (UUID v4, ADR 0004): minted and
+   * persisted by the caller before the runner was entered, so `onLegStart` is
+   * never asked for it. A value that is not a UUID v4 ends the run as
+   * `local-error` / `leg-start` / `not-dispatched`, with no provider call.
+   */
+  readonly firstAttemptKey: string;
   readonly onLegStart: ChatReplyLegStart;
   readonly onEvent?: ChatReplyEventSink;
   readonly onToolCall?: ChatReplyToolHandler;
@@ -448,7 +462,8 @@ async function runOneLeg(
  * work; every other outcome is data in the returned [ChatReplyResult].
  */
 export async function runChatReply(options: RunChatReplyOptions): Promise<ChatReplyResult> {
-  const { replyId, request, client, tier, onLegStart, onEvent, onToolCall, signal } = options;
+  const { replyId, request, client, tier, firstAttemptKey, onLegStart, onEvent, onToolCall, signal } =
+    options;
   const maxToolTurns = options.maxToolTurns ?? DEFAULT_MAX_TOOL_TURNS;
 
   if (typeof replyId !== 'string' || replyId.trim().length === 0) {
@@ -531,33 +546,51 @@ export async function runChatReply(options: RunChatReplyOptions): Promise<ChatRe
       });
     }
 
-    // The app-owned billable boundary: awaited, before the SDK call.
-    const started = await raceAbort<ChatReplyLegDispatch>(
-      () => onLegStart({ replyId, legIndex, request: providerRequest }),
-      signal,
-    );
-    if (started.status === 'aborted') {
-      return finish({ kind: 'cancelled', legIndex, disposition: 'not-dispatched' });
-    }
-    if (started.status === 'failed') {
-      return finish({
-        kind: 'local-error',
-        stage: 'leg-start',
-        legIndex,
-        disposition: 'not-dispatched',
-        error: started.error,
-      });
-    }
-    const attemptKey = started.value?.attemptKey;
-    if (!isUuidV4(attemptKey)) {
-      // No provider call, and no automatic replacement key is minted.
-      return finish({
-        kind: 'local-error',
-        stage: 'leg-start',
-        legIndex,
-        disposition: 'not-dispatched',
-        error: new TypeError('onLegStart must return an attemptKey that is a UUID v4'),
-      });
+    // The app-owned billable boundary. The first leg's key was already minted
+    // and persisted by the caller, so it is used verbatim and `onLegStart` is
+    // not consulted for it; every following leg is awaited here, before the
+    // SDK call. Either way an invalid key means no provider call, and no
+    // automatic replacement key is ever minted.
+    let attemptKey: string;
+    if (legIndex === 0) {
+      if (!isUuidV4(firstAttemptKey)) {
+        return finish({
+          kind: 'local-error',
+          stage: 'leg-start',
+          legIndex,
+          disposition: 'not-dispatched',
+          error: new TypeError('firstAttemptKey must be a UUID v4'),
+        });
+      }
+      attemptKey = firstAttemptKey;
+    } else {
+      const started = await raceAbort<ChatReplyLegDispatch>(
+        () => onLegStart({ replyId, legIndex, request: providerRequest }),
+        signal,
+      );
+      if (started.status === 'aborted') {
+        return finish({ kind: 'cancelled', legIndex, disposition: 'not-dispatched' });
+      }
+      if (started.status === 'failed') {
+        return finish({
+          kind: 'local-error',
+          stage: 'leg-start',
+          legIndex,
+          disposition: 'not-dispatched',
+          error: started.error,
+        });
+      }
+      const nextKey = started.value?.attemptKey;
+      if (!isUuidV4(nextKey)) {
+        return finish({
+          kind: 'local-error',
+          stage: 'leg-start',
+          legIndex,
+          disposition: 'not-dispatched',
+          error: new TypeError('onLegStart must return an attemptKey that is a UUID v4'),
+        });
+      }
+      attemptKey = nextKey;
     }
 
     if (isAborted(signal)) {

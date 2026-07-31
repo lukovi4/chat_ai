@@ -1,5 +1,9 @@
 # Server Contract (the BFF / proxy)
 
+> **Audience: whoever implements or reviews the server side.** Not an
+> integration guide — an app integrator starts at the repository
+> [README.md](../../../README.md).
+
 The contract between the Package's **AI Backend** client and the **proxy (BFF)** —
 the server that holds the provider key and streams the reply. The proxy is deployed
 fresh per Consuming App (own key, own billing). See ADR 0001 (key on server) and
@@ -503,16 +507,19 @@ generation runs **detached from the client connection**, tokens are written to a
 client reads what it missed.
 
 **Durable reply recovery is NOT this.** The package now ships two additive,
-unconnected pieces: the client-side durable reply lifecycle (`DurableChatBackend`
-+ `ChatSession.open`, V1_SPEC §3/§8) and the connection-independent server
-runner (`src/runner`, see docs/server-template.md). Together they let an
-app-owned backend keep generating while no client observes it, and let a client
-re-attach to that reply afterwards. What they do **not** provide:
+unconnected pieces: the client-side durable reply lifecycle (`ChatSession.open`
+plus one of the two opt-in capabilities — `DurableChatBackend` with a
+client-owned tool loop, or `ServerManagedDurableChatBackend` with a
+server-owned one, V1_SPEC §3/§8) and the connection-independent server runner
+(`src/runner`, see docs/server-template.md). Together they let an app-owned
+backend keep generating while no client observes it, and let a client re-attach
+to that reply afterwards. What they do **not** provide:
 
 - no `streamId`/`eventId` cursor resume — the fields of this section stay
   reserved and unimplemented on both sides;
 - an attached reply is re-delivered from the **start of its current provider
-  leg**, not from the last event a client saw;
+  leg** (client-owned tool loop) or from the **start of the reply's visible
+  text** (server-managed), never from the last event a client saw;
 - the intermediate store that makes such a re-delivery possible is the
   **app's**; the package defines no storage, schema or wire for it.
 

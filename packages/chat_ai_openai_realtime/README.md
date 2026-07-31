@@ -1,5 +1,10 @@
 # chat_ai_openai_realtime
 
+> **Technical adapter reference.** The single integration guide — packages,
+> installation, `ChatSession` setup, tools, persistence, durable modes — is the
+> repository [README.md](../../README.md). This file documents only what is
+> specific to this transport.
+
 An OpenAI Realtime (WebSocket) transport for the
 [`chat_ai`](../../README.md) package. **This package contains only a
 Realtime `ChatBackend`** — nothing else: no Core changes, no widgets, no

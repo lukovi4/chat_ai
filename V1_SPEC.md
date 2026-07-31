@@ -55,8 +55,11 @@ claim an installed SDK, working dispatch path or v1 support.
 ## 2. Dependencies (all internal to the package)
 
 The app does **not** see these. The core carries **no transport dependency**:
-Firebase/dio/SSE live in the `chat_ai_firebase` adapter and WebRTC in the
-`chat_ai_openai_realtime` adapter — each with its own dependency table.
+Firebase/dio/SSE live in the `chat_ai_firebase` adapter and the direct OpenAI
+Realtime WebSocket in the `chat_ai_openai_realtime` adapter — each with its own
+dependency table. (WebRTC belongs to the OPTIONAL
+`chat_ai_openai_realtime_voice` speech-to-speech package, which is not a
+`ChatBackend` and is not used by `ChatSession`.)
 Policy: **maintained, current packages only** — verified against pub.dev at
 spec time (2026-07-10).
 
@@ -132,6 +135,9 @@ session.botProfile = otherBot;  // mutable: "switching bots is just the next
 // outside the Chat AI Tool Schema v1 dialect (docs/TOOL-SCHEMA-V1.md).
 // CONSTRUCTOR/setter throw ArgumentError on a violation; the setter leaves the
 // old profile unchanged, with no backend call or Idempotency-Key.
+// The ONE exception: with a ServerManagedDurableChatBackend (§8) the tool loop
+// is the server's, so tools without a resolver are legal — the declarations
+// themselves are validated identically.
 
 // Commands (money semantics per ADR 0004 / CONTEXT.md §Retry Boundary):
 session.send(text, images: [...]);   // fresh Idempotency-Key; text may be
@@ -339,10 +345,23 @@ user Message with no following assistant Message.
 ### Persistence checkpoint
 
 `checkpoint` is awaited after the relevant Message and `attemptKey` are in the
-snapshot and before **every billable provider dispatch**: the first leg, each new
-tool leg, and a fresh-key fallback after explicit `409`/`410` recovery. A silent
-retry of an already-checkpointed frozen Attempt does not checkpoint again.
-"First leg" includes the first backend request of an explicit same-key
+snapshot and before **every billable dispatch the Core itself owns**. Which
+dispatches those are — and through which method — depends on the declared
+backend:
+
+- a plain `ChatBackend` — the first leg, each new tool leg and a fresh-key
+  fallback after explicit `409`/`410` recovery; each dispatch is
+  `ChatBackend.send`;
+- a `DurableChatBackend` — the same legs, each dispatched through `startReply`
+  (§8), never `send`;
+- a `ServerManagedDurableChatBackend` — only the **single `startReply`** of the
+  whole logical reply, and that checkpoint persists the **first leg's**
+  `attemptKey`. The Core does NOT checkpoint the server-owned legs that follow:
+  their persistence boundary is the app's own awaited `runChatReply.onLegStart`
+  on its server (§9).
+
+A silent retry of an already-checkpointed frozen Attempt does not checkpoint
+again. "First leg" includes the first backend request of an explicit same-key
 resend/recovery command, because an expired/unknown key may run.
 `checkpoint: null` is valid only when the Consuming App intentionally has no
 cross-launch conversation persistence.
@@ -874,7 +893,8 @@ Production transports implement this interface in the companion adapters:
 `FirebaseChatBackend` (`chat_ai_firebase` — dio + Firebase tokens + the SSE
 pipeline; its wire-version check, SSE parser contract and HTTP binding moved
 unchanged to the adapter's docs) and `OpenAIRealtimeChatBackend`
-(`chat_ai_openai_realtime` — direct WebRTC).
+(`chat_ai_openai_realtime` — a direct OpenAI Realtime **WebSocket**, text
+output; no WebRTC and no microphone).
 
 **Deadline mechanics in the Core** (realizes CONTEXT.md §Retry Boundary): the
 Core records `startedAt` at the command and checks elapsed time only at
@@ -893,10 +913,14 @@ the whole logical reply**: all legs of one reply use the profile taken at the
 send; `session.botProfile =` during `AwaitingTool` affects only the next
 command, never the reply in flight.
 
-For every **new billable leg**, the Core first updates the Message/key, awaits
-`checkpoint`, and only then invokes `ChatBackend.send`. This includes the
-first leg, every tool-result leg and the one fresh-key fallback authorised by
-explicit recovery. A silent retry reuses the already-checkpointed frozen
+For every **new billable leg the Core owns**, it first updates the Message/key,
+awaits `checkpoint`, and only then dispatches: `ChatBackend.send` with a plain
+backend, `startReply` on both durable paths (§8). This includes the first leg,
+every tool-result leg and the one fresh-key fallback authorised by explicit
+recovery. With a `ServerManagedDurableChatBackend` the Core owns exactly one
+such dispatch — the single `startReply`, checkpointed with the first leg's key —
+and the server-owned legs after it are checkpointed by the app on its own
+server, never here. A silent retry reuses the already-checkpointed frozen
 request and key. The callback is never overlapped with a backend dispatch for
 that leg.
 
@@ -905,6 +929,17 @@ that leg.
 A transport MAY additionally implement `DurableChatBackend` — a long-running
 operation instead of a connection. `ChatBackend.send` and its semantics are
 unchanged, and a session takes this path only when the backend implements it.
+
+There are **two independent opt-in durable modes**, and the declared interface
+alone decides which one applies — they are never mixed:
+
+| | `DurableChatBackend` | `ServerManagedDurableChatBackend` |
+|---|---|---|
+| owner of the tool loop | the **Core** (client-owned) | the **server** |
+| `startReply` | one billable **leg** | the whole logical **reply**, once |
+| `tool_call` on the wire | expected; `onToolCall` answers it | a contract violation |
+| next leg's `attemptKey` | minted+checkpointed by the Core | the server's |
+| silent retry / fresh-key fallback | as in v1 | never |
 
 ```dart
 abstract interface class DurableChatBackend implements ChatBackend {
@@ -917,7 +952,7 @@ abstract interface class DurableChatBackend implements ChatBackend {
     // null    = the backend PROVED there is no active reply
     // throw   = the status is unknown (never treated as null)
   Future<void> cancelReply(String replyId);
-    // the explicit remote cancel; at most once per session
+    // the explicit remote cancel; at most once per logical reply
 }
 ```
 
@@ -933,9 +968,14 @@ so the provider-effective first leg stays identical to the legacy one. The
 tool loop stays in the Core: the next leg is `startReply` with the SAME
 `replyId` and a new checkpointed `attemptKey`.
 
-Lifecycle: a terminal/`dispose()` detaches (never a remote cancel); the user's
-`cancel()` ends the local session in `Cancelled`, keeps the partial and fires
-`cancelReply` at most once — and never at all when no leg reached the backend.
+Lifecycle: neither a terminal nor `dispose()` ever fires a remote cancel. A
+terminal `BackendEvent` (`done`/`error`) ends the reply itself and its
+observation; `dispose()` only detaches the observation, so a reply that has not
+terminated may still be running remotely. Only the user's `cancel()` requests
+remote cancellation: it ends the local session in `Cancelled`, keeps the partial
+and fires `cancelReply` at most once **per logical reply** (a later reply of the
+same session is cancellable in turn) — and never at all when no leg reached the
+backend.
 
 Recovery (only through `ChatSession.open`): the candidate is a trailing
 `streaming` assistant Message; a returned stream keeps it `streaming`, moves
@@ -945,6 +985,46 @@ normalization; a throw propagates untouched. The attached leg has no frozen
 request, so ANY of its outcomes — retryable causes included — is terminal for
 that session: recovery never dispatches. The package ships no durable backend
 implementation.
+
+### The server-managed variant (additive, opt-in)
+
+```dart
+abstract interface class ServerManagedDurableChatBackend
+    implements DurableChatBackend {
+  Stream<BackendEvent> startReply(String replyId, ChatRequest request);
+    // starts the WHOLE logical reply ONCE — not one leg; `idempotencyKey` is
+    // the already-persisted key of its FIRST provider leg; the server runs the
+    // tools and every following leg itself
+  Future<Stream<BackendEvent>?> attachReply(String replyId);
+    // same three outcomes; the replay restarts the reply's VISIBLE TEXT from
+    // the beginning
+  Future<void> cancelReply(String replyId);
+}
+```
+
+No new event type, no ownership enum, no mode flag: the interface IS the
+declaration. The observation stream carries exactly `accepted`, `delta`, `done`
+and `error`; server-owned `tool_call`s, their results and the provider
+continuity state never reach the session.
+
+What the Core does differently in this mode, and nothing else:
+
+- a Bot Profile **with tools needs no `onToolCall`** (the declarations are
+  validated exactly as always);
+- the assistant Message is still created and checkpointed before the first
+  dispatch, its `Message.id` is the `replyId` and its persisted `attemptKey`
+  stays the first leg's key;
+- `startReply` happens **exactly once per logical reply**: no `_handleToolCall`
+  /`onToolCall`, no next-leg keys, no silent retry, no fresh-key fallback and no
+  second `startReply`; `rate`/`overloaded`/`network`/`error` are the **terminal
+  result of the observed server reply**;
+- an unexpected `provider_state`, `tool_call`, `409` or `410` is a
+  **backend-contract violation**: the reply ends as one `upstream` failure,
+  with no resolver call and no new dispatch;
+- lifecycle is unchanged — `dispose()` only detaches, `cancel()` fires
+  `cancelReply` at most once per logical reply, `ChatSession.open` consults
+  `attachReply` once and a successful attach dispatches nothing; the first
+  replayed delta replaces the persisted partial as a whole.
 
 ## 9. Server template
 
@@ -1037,8 +1117,10 @@ and run in that package; the numbering is kept for continuity:
 7. **Checkpoint**: snapshot contains the new Message/key before callback;
    first-leg failure marks user `failed` + `FailurePhase.sending`; tool-leg
    failure marks assistant `interrupted` + `FailurePhase.streaming`; backend is
-   never called. First leg, every tool leg and explicit fresh fallback await a
-   checkpoint; a silent retry does not repeat it.
+   never called. Every billable dispatch the Core owns awaits a checkpoint —
+   first leg, every tool leg and the explicit fresh fallback, and with a
+   `ServerManagedDurableChatBackend` only the single `startReply`; a silent
+   retry does not repeat it.
 8. **Tool cycle and safety**: fresh key per leg; leg usage sums; `tool_call` is
    terminal without `done`; resolver exceptions are sanitised `is_error`;
    unknown tool/schema-invalid args never invoke resolver; existing result
@@ -1144,6 +1226,8 @@ and run in that package; the numbering is kept for continuity:
 
 ## References
 
+- README.md — the single integration guide of the repository (this spec stays
+  the normative contract, not the how-to)
 - CONTEXT.md — the domain glossary this spec realizes
 - docs/TOOL-SCHEMA-V1.md — the canonical Tool Schema v1 dialect
 - docs/adr/0002–0005 — the core decisions

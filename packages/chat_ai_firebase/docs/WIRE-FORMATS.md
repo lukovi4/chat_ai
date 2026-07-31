@@ -1,5 +1,9 @@
 # Firebase wire formats (exact shapes)
 
+> **Audience: server/transport implementers.** Byte-level reference, not an
+> integration guide — an app integrator starts at the repository
+> [README.md](../../../README.md).
+
 The exact HTTP JSON/SSE byte shapes of the Firebase transport, moved
 unchanged from the core `V1_SPEC.md` §6/§8 when the adapter was extracted.
 `SERVER-CONTRACT.md` defines the rules; this document pins the bytes. The

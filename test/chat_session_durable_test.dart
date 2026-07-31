@@ -63,6 +63,31 @@ class ManualDurableBackend implements DurableChatBackend {
   }
 }
 
+/// The same manual transport, declaring the SERVER-MANAGED variant: the server
+/// owns the whole logical reply and its tool loop, so this session only starts,
+/// observes, re-attaches and cancels it.
+class ManualServerManagedBackend extends ManualDurableBackend
+    implements ServerManagedDurableChatBackend {}
+
+/// A tools profile whose resolver is deliberately absent: legal only because
+/// the tool loop belongs to the server.
+const BotProfile serverToolProfile = BotProfile(
+  id: 'premium',
+  systemPrompt: 'be kind',
+  tools: [
+    Tool(
+      name: 'search',
+      description: 'd',
+      parameters: {
+        'type': 'object',
+        'properties': <String, Object?>{},
+        'required': <String>[],
+        'additionalProperties': false,
+      },
+    ),
+  ],
+);
+
 Conversation historyWithRunningReply({
   MessageStatus userStatus = MessageStatus.sending,
   List<ContentPart> assistantParts = const [ContentPart.text('partial')],
@@ -298,6 +323,32 @@ void main() {
       expect(backend.startedReplyIds, isEmpty);
       expect(backend.cancelledReplyIds, isEmpty);
     });
+
+    test('the remote cancel is once per reply, not once per session', () async {
+      final backend = ManualDurableBackend();
+      final session = makeSession(backend: backend);
+      addTearDown(session.dispose);
+
+      for (final text in ['one', 'two']) {
+        await session.send(text);
+        backend.emit(const BackendEvent.accepted());
+        backend.emit(const BackendEvent.delta('par'));
+        await waitForState(session, (state) => state is Streaming);
+        session.cancel();
+        session.cancel(); // a repeated cancel of the same reply adds nothing
+        await Future<void>.delayed(Duration.zero);
+        expect(session.state, isA<Cancelled>());
+      }
+
+      // Two distinct logical replies, each remotely cancelled exactly once:
+      // cancelling the first never mutes the cancel of the second.
+      expect(backend.startedReplyIds, hasLength(2));
+      expect(
+        backend.startedReplyIds.first,
+        isNot(backend.startedReplyIds.last),
+      );
+      expect(backend.cancelledReplyIds, backend.startedReplyIds);
+    });
   });
 
   group('recovery through attachReply', () {
@@ -515,6 +566,131 @@ void main() {
           checkpoints[1].messages.last.attemptKey,
           requests[1].idempotencyKey,
         );
+      },
+    );
+  });
+
+  group('server-managed durable reply', () {
+    test(
+      'a tools profile runs without a client resolver, one startReply',
+      () async {
+        final backend = ManualServerManagedBackend();
+        // Tools without onToolCall: legal ONLY because the loop is the server's.
+        final session = makeSession(
+          backend: backend,
+          botProfile: serverToolProfile,
+        );
+        addTearDown(session.dispose);
+
+        await session.send('hi');
+        backend.emit(const BackendEvent.accepted());
+        backend.emit(const BackendEvent.delta('server did the tools'));
+        backend.emit(const BackendEvent.done());
+        await waitForState(session, (state) => state is Done);
+
+        // ONE startReply for the whole logical reply — the tool leg the server
+        // ran in between never became a client dispatch.
+        expect(backend.startedReplyIds, hasLength(1));
+        expect(backend.requests, hasLength(1));
+        expect(
+          visibleText(session.snapshot.messages.last),
+          'server did the tools',
+        );
+      },
+    );
+
+    test(
+      'an unexpected toolCall resolves nothing and starts nothing',
+      () async {
+        final backend = ManualServerManagedBackend();
+        var resolverCalls = 0;
+        final session = makeSession(
+          backend: backend,
+          botProfile: serverToolProfile,
+          onToolCall: (call) async {
+            resolverCalls++;
+            return const ToolResult(content: '3 notes', isError: false);
+          },
+        );
+        addTearDown(session.dispose);
+
+        await session.send('hi');
+        backend.emit(const BackendEvent.accepted());
+        backend.emit(
+          const BackendEvent.toolCall(
+            ToolCall(id: 'call_1', name: 'search', args: {}),
+          ),
+        );
+        final state = await waitForState(session, (state) => state is Failed);
+
+        // A backend-contract violation ends the observed reply as one upstream
+        // failure: no resolver call, no second startReply.
+        expect((state as Failed).cause, FailureCause.upstream);
+        expect(resolverCalls, 0);
+        expect(backend.startedReplyIds, hasLength(1));
+        expect(backend.requests, hasLength(1));
+      },
+    );
+
+    test(
+      'dispose only detaches; cancel remotely cancels at most once',
+      () async {
+        final detached = ManualServerManagedBackend();
+        final detaching = makeSession(backend: detached);
+        await detaching.send('hi');
+        detached.emit(const BackendEvent.accepted());
+        detached.emit(const BackendEvent.delta('par'));
+        await waitForState(detaching, (state) => state is Streaming);
+
+        await detaching.dispose();
+        expect(detached.cancelledSubscriptions, 1); // detach
+        expect(detached.cancelledReplyIds, isEmpty); // never a remote cancel
+
+        final backend = ManualServerManagedBackend();
+        final session = makeSession(backend: backend);
+        await session.send('hi');
+        backend.emit(const BackendEvent.accepted());
+        backend.emit(const BackendEvent.delta('par'));
+        await waitForState(session, (state) => state is Streaming);
+
+        session.cancel();
+        session.cancel(); // a second cancel is a no-op
+        await Future<void>.delayed(Duration.zero);
+        expect(session.state, isA<Cancelled>());
+        expect(backend.cancelledReplyIds, [backend.startedReplyIds.single]);
+
+        await session.dispose();
+        expect(backend.cancelledReplyIds, hasLength(1));
+      },
+    );
+
+    test(
+      'reopen attaches and the replay replaces the partial as a whole',
+      () async {
+        final backend = ManualServerManagedBackend();
+        backend.onAttach = (_) => backend._open();
+        final session = await ChatSession.open(
+          backend: backend,
+          botProfile: plainProfile,
+          history: historyWithRunningReply(),
+        );
+        addTearDown(session.dispose);
+
+        expect(backend.attachedReplyIds, ['a-1']);
+        // Before the first replayed event the persisted partial is untouched.
+        expect(visibleText(session.snapshot.messages.last), 'partial');
+
+        backend.emit(const BackendEvent.delta('the whole reply'));
+        await waitForState(session, (state) => state is Streaming);
+        expect(visibleText(session.snapshot.messages.last), 'the whole reply');
+
+        backend.emit(const BackendEvent.done());
+        await waitForState(session, (state) => state is Done);
+
+        // A successful attach dispatches nothing: no send (it would throw), no
+        // startReply, no request.
+        expect(backend.startedReplyIds, isEmpty);
+        expect(backend.requests, isEmpty);
       },
     );
   });

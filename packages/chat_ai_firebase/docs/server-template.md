@@ -1,5 +1,9 @@
 # Серверный шаблон (BFF) — спецификация
 
+> **Аудитория: тот, кто деплоит и сопровождает серверный шаблон.** Это не
+> инструкция по интеграции — интегратор приложения начинает с корневого
+> [README.md](../../../README.md).
+
 > Шаблон объявлен частью кита в ADR 0001 («deployed fresh per Consuming App»).
 > Wire-поведение — в `SERVER-CONTRACT.md`; здесь зафиксированы платформа,
 > служебные схемы, обязательные hooks и deploy-gates.
@@ -430,17 +434,28 @@ pipeline остаются поведенчески неизменными — ru
 
 ```ts
 runChatReply({
-  replyId,      // стабильная identity всего логического reply (владелец — app)
-  request,      // уже провалидированный ChatRequest
-  client,       // инжектированный OpenAI client, maxRetries: 0
-  tier,         // { model, maxOutputTokens, reasoningEffort? }
-  onLegStart,   // awaited граница ПЕРЕД каждым billable provider leg
-  onEvent,      // упорядоченная awaited доставка NormalizedEvent + identity
-  onToolCall,   // server-side tool loop приложения
-  maxToolTurns, // default 5
-  signal,       // единственный способ отменить выполнение
+  replyId,          // стабильная identity всего логического reply (владелец — app)
+  request,          // уже провалидированный ChatRequest
+  client,           // инжектированный OpenAI client, maxRetries: 0
+  tier,             // { model, maxOutputTokens, reasoningEffort? }
+  firstAttemptKey,  // обязательный ключ ПЕРВОГО leg (UUID v4): app создал и
+                    //   сохранил его до входа в runner — onLegStart для leg 0
+                    //   не вызывается
+  onLegStart,       // awaited граница ПЕРЕД каждым СЛЕДУЮЩИМ billable leg
+                    //   (legIndex >= 1)
+  onEvent,          // упорядоченная awaited доставка NormalizedEvent + identity
+  onToolCall,       // server-side tool loop приложения
+  maxToolTurns,     // default 5
+  signal,           // единственный способ отменить выполнение
 }): Promise<ChatReplyResult>
 ```
+
+Ключи legs — целиком app-owned, но по двум разным каналам: leg 0 берёт
+`firstAttemptKey` дословно, каждый следующий leg — результат `onLegStart`.
+Невалидный (не UUID v4) ключ в любом из каналов завершает run как
+`local-error` / `leg-start` / `not-dispatched`, провайдер при этом не
+вызывается и подменный ключ не генерируется; бросок `onLegStart` — то же самое.
+Второго callback пакет не вводит.
 
 `ChatReplyResult` возвращает structured terminal (`done`, `provider-error` с
 `cause`/`retryAfterMs`/`disposition`, `tool-loop-limit`, `cancelled`,
@@ -461,7 +476,11 @@ const result = await runChatReply({
   tier: { model, maxOutputTokens },
   signal: worker.signal,
 
-  // Единственная точка, где приложение фиксирует billable leg ДО вызова
+  // Ключ первого leg приложение уже сохранило до входа в runner (это тот же
+  // attemptKey, который клиент положил в request.idempotencyKey).
+  firstAttemptKey,
+
+  // Точка, где приложение фиксирует КАЖДЫЙ СЛЕДУЮЩИЙ billable leg ДО вызова
   // провайдера: создать/вернуть собственный attemptKey (UUID v4).
   onLegStart: async ({ replyId, legIndex, request }) => {
     const attemptKey = await store.beginLeg(replyId, legIndex, request);
@@ -499,10 +518,15 @@ await store.finishReply(replyId, result.termination, result.parts, result.usage)
 - **smoke composition** (`src/smoke/`) — деплой-проверка, а **не** production
   backend;
 - пакет **не поставляет durable backend implementation** для Flutter: Dart
-  `DurableChatBackend` — это контракт, который реализует приложение;
+  `DurableChatBackend` (client-owned tool loop) и
+  `ServerManagedDurableChatBackend` (server-owned tool loop) — это два
+  независимых opt-in контракта, которые реализует приложение;
 - Dart durable capability и Node runner — **два независимых API**. Пакет не
   вводит новый wire, который связывал бы их напрямую: как события reply
-  доходят до клиента, решает приложение.
+  доходят до клиента, решает приложение. Runner естественно ложится на
+  server-managed режим (server-owned tool loop, ключ первого leg — тот же
+  `firstAttemptKey`, который клиент уже сохранил), но эта связка — композиция
+  приложения, а не контракт пакета.
 
 ## Деплой под новое приложение
 

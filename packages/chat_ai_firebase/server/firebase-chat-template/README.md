@@ -1,5 +1,11 @@
 # firebase-chat-template
 
+> **README of this deployable template only** — not the integration guide of the
+> `chat_ai_firebase` package and not of the kit. How an app chooses a variant,
+> installs the packages and wires `ChatSession` is in the repository
+> [README.md](../../../../README.md); the ownership/composition rules of the
+> template are in [`docs/server-template.md`](../../docs/server-template.md).
+
 Deployable **Firebase Cloud Functions gen2 (TypeScript) BFF template** for the
 `chat_ai` kit. Like the sibling `record_transcribe` template, one copy is
 deployed **fresh per consuming app** — its own Firebase project, its own provider

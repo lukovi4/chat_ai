@@ -1,5 +1,11 @@
 # chat_ai_openai_realtime_voice
 
+> **Detailed voice API reference.** The minimal wiring (installation, creating
+> a session, what the app owns) lives in the repository
+> [README.md](../../README.md) — the single integration guide. This file
+> documents the full voice surface: modes, transcripts, recording, tools,
+> guardrail and limitations.
+
 An **optional** speech-to-speech voice session for `chat_ai`. It is a separate
 package in the same repository — not a separate Git repository, and not
 published.
