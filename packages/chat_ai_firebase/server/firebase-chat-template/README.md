@@ -65,8 +65,12 @@ for every case.
 
 ## Platform & runtime
 
-- **Firebase Cloud Functions gen2**, Node.js runtime **`nodejs24`** (set in
-  `firebase.json`). `engines.node` pins `>=24`. `main` points at `lib/index.js`.
+- **Firebase Cloud Functions gen2**, Node.js runtime **`nodejs22`** (set in
+  `firebase.json`, which is authoritative for the deployed runtime — Cloud
+  Functions for Firebase supports Node.js 20 and 22). `engines.node` pins the
+  local toolchain to exactly that major, **`"22"`**, and the local type
+  definitions (`@types/node`) track the **22.x** branch so they describe the same
+  runtime that is deployed. `main` points at `lib/index.js`.
 - Production dependencies: the official **`openai`**, **`firebase-admin`** and
   **`firebase-functions`** SDKs. `firebase-admin` supplies the concrete `Auth` /
   `App Check` / `Firestore` / `Bucket` / `Timestamp` types/values injected into
@@ -81,10 +85,19 @@ for every case.
   `firebase-admin` peer range of `^11 || ^12 || ^13` — it does **not** yet accept
   `firebase-admin@14`. To keep a clean, conflict-free install (no
   `--legacy-peer-deps`, no `--force`, no overrides), `firebase-admin` is pinned
-  **exactly to `13.10.0`** (the latest compatible 13.x). This is the **only**
-  allowed deviation from latest-stable, and `npm outdated` may show **only**
-  `firebase-admin`. **Removal condition:** as soon as a latest `firebase-functions`
-  accepts `firebase-admin@14`, drop the pin and move back to latest `firebase-admin`.
+  **exactly to `13.10.0`** (the latest compatible 13.x). **Removal condition:** as
+  soon as a latest `firebase-functions` accepts `firebase-admin@14`, drop the pin
+  and move back to latest `firebase-admin`.
+- **Deliberate `@types/node` pin (runtime alignment, not a temporary exception).**
+  `@types/node` is held on major **22** on purpose: the type definitions must
+  describe the Firebase production runtime (`nodejs22`), and a newer major would
+  type APIs the deployed runtime does not have.
+- Because of those two pins, **`npm outdated` may list `firebase-admin` *and*
+  `@types/node`** — that output is expected and is not, by itself, a reason to bump
+  either. In particular the newer `@types/node` majors are **not** permission to
+  raise the runtime above Node 22: `firebase.json` decides the runtime, and it must
+  stay on a version Cloud Functions for Firebase actually supports. `@types/node`
+  moves only when the pinned Firebase runtime itself moves.
 - Dev-only: `typescript`, `@types/node`, `vitest`. No Anthropic SDK (backlog), no
   Ajv/Zod/Express/DI framework.
 - **SDK retries must be zero.** The factory verifies each provider client's

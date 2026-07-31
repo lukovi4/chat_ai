@@ -101,7 +101,7 @@ function buildHandler(): ChatHttpHandler {
 
 /**
  * The deployable OpenAI-only smoke Cloud Function `chat` (Functions gen2,
- * runtime `nodejs24` via firebase.json). Deployed to the mandatory
+ * runtime `nodejs22` via firebase.json). Deployed to the mandatory
  * `CHAT_FUNCTION_REGION`; `timeoutSeconds` equals the factory
  * `functionTimeoutSeconds`; only `OPENAI_API_KEY` is secret-bound.
  */

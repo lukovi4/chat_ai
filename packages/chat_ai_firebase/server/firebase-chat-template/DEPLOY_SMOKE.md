@@ -98,7 +98,7 @@ firebase deploy --only functions
 ```
 
 `predeploy` runs `npm run build` (emits `lib/`). The exported function is `chat`
-(runtime `nodejs24`, region `CHAT_FUNCTION_REGION`, `timeoutSeconds: 300`, secret
+(runtime `nodejs22`, region `CHAT_FUNCTION_REGION`, `timeoutSeconds: 300`, secret
 `OPENAI_API_KEY`).
 
 ## 8. Invoker IAM (gen2) — network invocation only, Auth/App Check still enforced
