@@ -88,8 +88,9 @@ describe('owner — successful done', () => {
     expect(sent.include).toEqual(['reasoning.encrypted_content']);
     expect(sent.max_output_tokens).toBe(OPENAI_TIER.maxOutputTokens);
     expect(sent.parallel_tool_calls).toBe(false);
-    // A tier without reasoningEffort keeps the previous request shape.
+    // A tier without reasoningEffort/compactThreshold keeps the previous shape.
     expect('reasoning' in sent).toBe(false);
+    expect('context_management' in sent).toBe(false);
   });
 
   it('a tier reasoningEffort reaches the actual OpenAI request', async () => {
@@ -98,6 +99,16 @@ describe('owner — successful done', () => {
     });
     await h.run();
     expect(h.client.lastRequest!.reasoning).toEqual({ effort: 'high' });
+  });
+
+  it('a tier compactThreshold reaches the actual OpenAI request', async () => {
+    const h = ownerHarness(okEvents, {
+      checkEntitlement: async () => ({ kind: 'allowed', tier: { ...OPENAI_TIER, compactThreshold: 200_000 } }),
+    });
+    await h.run();
+    expect(h.client.lastRequest!.context_management).toEqual([
+      { type: 'compaction', compact_threshold: 200_000 },
+    ]);
   });
 
   it('reuses the stream translator, preserving delta order, done last, no re-batch', async () => {

@@ -296,7 +296,7 @@ await FirebaseAppCheck.instance.activate(
 2. Положить `OPENAI_API_KEY` в Secret Manager — и только туда.
 3. Настроить tier для того `BotProfile.id`, который шлёт приложение: `model`,
    `maxOutputTokens`.
-4. Опционально задать `reasoningEffort` этого tier.
+4. Опционально задать `reasoningEffort` и `compactThreshold` этого tier.
 5. Заменить smoke-композицию на **четыре production hooks**:
    `checkEntitlement`, `checkRateLimit`, `reserveQuota`, `settleQuota`.
 6. Настроить Firestore (idempotency + TTL), приватный replay bucket и IAM.
@@ -308,6 +308,31 @@ await FirebaseAppCheck.instance.activate(
 - если она задана, provider получает `reasoning: { effort: ... }` в каждом
   запросе этого tier (включая каждый leg server-side tool loop);
 - если не задана, запрос уходит **без** ключа `reasoning`;
+- **`compactThreshold` — тоже настройка server-side tier**, не клиента: это
+  единственное, что задаёт приложение для встроенного OpenAI Compact. Если
+  значение задано, каждый запрос этого tier уходит с автоматическим
+  `context_management: [{ type: "compaction", compact_threshold: ... }]`; если
+  не задано, ключа `context_management` в запросе нет и Compact выключен.
+  Значение должно быть **положительным safe integer**; сам порог и поддержку
+  выбранной моделью проверяет владелец deployment — allowlist моделей в пакете
+  нет;
+- **Compact и обрезку истории реализует сам пакет**: proxy возвращает compact
+  state как обычный `ProviderOpaquePart`, `FirebaseChatBackend` перестаёт
+  отправлять историю старше последнего compact item, а server отправляет
+  OpenAI только последний compact item и всё, что после него. Отдельного
+  `/responses/compact`, нового поля Firestore или указателя в приложении нет;
+- **с автоматическим Compact у `FirebaseChatBackend` нужно оставить
+  `ChatSession.trimBudget: null`** — это значение по умолчанию. Текущий
+  локальный newest-that-fit trimming нельзя включать одновременно с Compact:
+  Core выполняет его до backend и целыми Message, поэтому может удалить
+  Message с последним Compact item ещё до того, как backend найдёт границу.
+  Совместного режима `trimBudget` + Compact нет;
+- **актуальный продуктовый контекст по-прежнему формирует приложение**: system
+  prompt, память и текущие продуктовые данные приложение продолжает добавлять
+  в текущий контекст. Compact сжимает историю, но не заменяет контекст,
+  который приложение обязано передать;
+- Compact относится **только** к пути OpenAI Responses/Firebase и Node runner;
+  OpenAI Realtime и voice-пакеты он не затрагивает;
 - **smoke hooks не являются production policy** — это композиция для
   выделенного одноразового smoke-проекта;
 - `FirebaseChatBackend` connection-bound и **сам по себе не durable backend**.

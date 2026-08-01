@@ -4,10 +4,12 @@ import { translateOpenAIStream } from '../src/providers/openai/stream';
 import { NormalizedEvent } from '../src/core/wire';
 import {
   asStream,
+  compactionItemDone,
   errorEvent,
   functionArgsDelta,
   functionCallAdded,
   functionCallDone,
+  makeCompactionItem,
   makeReasoningItem,
   makeResponse,
   makeUsage,
@@ -78,6 +80,48 @@ describe('OpenAI stream — provider opaque continuity', () => {
       { kind: 'done', usage: { inputTokens: 3, outputTokens: 4, usageRaw: makeUsage(3, 4) } },
     ]);
   });
+});
+
+describe('OpenAI stream — server-side Compact state', () => {
+  it('emits exactly one byte-exact provider_state for a complete compaction item', async () => {
+    const item = makeCompactionItem({ id: 'cmpt_9', encrypted_content: 'COMPACT-BYTES' });
+    const out = await collect([compactionItemDone(item), responseCompleted(okUsage)]);
+    const expectedBytes = new Uint8Array(Buffer.from(JSON.stringify(item), 'utf8'));
+    expect(out).toEqual([
+      { kind: 'provider_state', provider: 'openai', data: expectedBytes },
+      { kind: 'done', usage: { inputTokens: 3, outputTokens: 4, usageRaw: makeUsage(3, 4) } },
+    ]);
+  });
+
+  it('keeps the optional created_by field inside the serialised state', async () => {
+    const item = makeCompactionItem({ created_by: 'actor_1' });
+    const out = await collect([compactionItemDone(item), responseCompleted(okUsage)]);
+    const state = out[0] as Extract<NormalizedEvent, { kind: 'provider_state' }>;
+    expect(JSON.parse(Buffer.from(state.data).toString('utf8'))).toEqual(item);
+  });
+
+  it.each([
+    ['missing encrypted_content', { encrypted_content: undefined }],
+    ['empty encrypted_content', { encrypted_content: '' }],
+    ['missing id', { id: undefined }],
+    ['empty id', { id: '' }],
+    ['non-string created_by', { created_by: 7 }],
+  ])(
+    'a compaction item without its required state (%s) fails closed and ends the stream',
+    async (_label, overrides) => {
+      const item = { ...makeCompactionItem(), ...overrides } as Responses.ResponseCompactionItem;
+      const out = await collect([
+        textDelta('partial'),
+        compactionItemDone(item),
+        responseCompleted(okUsage),
+      ]);
+      // The already-emitted delta survives; no provider_state, no done.
+      expect(out).toEqual([
+        { kind: 'delta', text: 'partial' },
+        { kind: 'error', cause: 'upstream' },
+      ]);
+    },
+  );
 });
 
 describe('OpenAI stream — function calls', () => {

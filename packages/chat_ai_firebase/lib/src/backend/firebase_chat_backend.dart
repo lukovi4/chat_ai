@@ -249,7 +249,9 @@ class FirebaseChatBackend implements ChatBackend {
         _url,
         // The frozen serialized request (V1_SPEC §8): dio sends a String
         // body as-is — no re-encoding, byte-identical across silent retries.
-        data: encodeChatRequestBody(request),
+        // [_pruneToLastCompact] is a deterministic pure function of the same
+        // request, so the frozen body stays byte-identical too.
+        data: encodeChatRequestBody(_pruneToLastCompact(request)),
         cancelToken: cancelToken,
         options: Options(
           responseType: ResponseType.stream,
@@ -522,6 +524,117 @@ class FirebaseChatBackend implements ChatBackend {
   /// per request.
   static Future<String?> _firebaseAppCheckToken() =>
       FirebaseAppCheck.instance.getToken();
+}
+
+/// The exact key set of an OpenAI server-side Compact item — the installed
+/// server SDK's `ResponseCompactionItem` (SERVER-CONTRACT §1). Nothing else may
+/// ride inside a part that is treated as a history boundary.
+const Set<String> _compactionItemKeys = {
+  'id',
+  'encrypted_content',
+  'type',
+  'created_by',
+};
+
+/// Whether [part] is a valid OpenAI server-side Compact item: an `openai`
+/// [ProviderOpaquePart] whose bytes decode as strict UTF-8 JSON to exactly
+/// `{type:"compaction", id, encrypted_content, created_by?}` with non-empty
+/// `id`/`encrypted_content`. The check mirrors the server's own strict
+/// validation, so client and proxy agree on what a boundary is.
+///
+/// Anything else — a reasoning item, a foreign provider, malformed
+/// UTF-8/JSON, an unknown `type`, an extra key, an empty required field — is
+/// deliberately **not** a boundary by itself. Its fate then follows the last
+/// valid compact item: with no newer valid Compact the request is not pruned
+/// around such a part, so it stays in the request and is handled on the server
+/// by the existing fail-closed opaque-state contract; with a newer valid
+/// Compact it is dropped together with the rest of the old prefix.
+bool _isOpenAICompactItem(ContentPart part) {
+  if (part is! ProviderOpaquePart || part.provider != 'openai') {
+    return false;
+  }
+  final Object? decoded;
+  try {
+    // Strict UTF-8 (malformed bytes throw), then JSON.
+    decoded = jsonDecode(utf8.decode(part.data));
+  } catch (_) {
+    return false;
+  }
+  if (decoded is! Map<String, dynamic>) {
+    return false;
+  }
+  if (decoded.keys.any((key) => !_compactionItemKeys.contains(key))) {
+    return false;
+  }
+  if (decoded['type'] != 'compaction') {
+    return false;
+  }
+  final Object? id = decoded['id'];
+  if (id is! String || id.isEmpty) {
+    return false;
+  }
+  final Object? encryptedContent = decoded['encrypted_content'];
+  if (encryptedContent is! String || encryptedContent.isEmpty) {
+    return false;
+  }
+  if (decoded.containsKey('created_by') && decoded['created_by'] is! String) {
+    return false;
+  }
+  return true;
+}
+
+/// Internal, deterministic wire-side Compact pruning (SERVER-CONTRACT §1): the
+/// device must not keep re-uploading history that the last server-side Compact
+/// item already summarises.
+///
+/// A backward scan finds the LAST valid OpenAI compact part. Without one the
+/// request is returned **unchanged**, so the JSON body stays exactly what it
+/// was before this feature existed. With one, the returned wire copy keeps, in
+/// the original order:
+/// - every `system` Message (wherever it sits);
+/// - the Message holding the compact part, starting AT that part (earlier parts
+///   of that Message are not sent);
+/// - every following Message in full.
+///
+/// The incoming [ChatRequest] — and therefore the persisted `Conversation` it
+/// was assembled from — is never mutated: only a new wire copy is built. No
+/// pointer, Firestore field or extra storage is involved; the boundary is
+/// re-derived from the request itself on every send, so a restart or a new
+/// device finds it again from the persisted `ProviderOpaquePart` alone.
+ChatRequest _pruneToLastCompact(ChatRequest request) {
+  var boundaryMessage = -1;
+  var boundaryPart = -1;
+  outer:
+  for (var m = request.messages.length - 1; m >= 0; m -= 1) {
+    final parts = request.messages[m].parts;
+    for (var p = parts.length - 1; p >= 0; p -= 1) {
+      if (_isOpenAICompactItem(parts[p])) {
+        boundaryMessage = m;
+        boundaryPart = p;
+        break outer;
+      }
+    }
+  }
+  if (boundaryMessage < 0) {
+    return request;
+  }
+
+  final messages = <Message>[];
+  for (var m = 0; m < request.messages.length; m += 1) {
+    final message = request.messages[m];
+    if (m > boundaryMessage || message.role == MessageRole.system) {
+      messages.add(message);
+    } else if (m == boundaryMessage) {
+      messages.add(
+        boundaryPart == 0
+            ? message
+            : message.copyWith(parts: message.parts.sublist(boundaryPart)),
+      );
+    }
+    // Ordinary history older than the boundary is exactly what the compact
+    // item summarises: it is not sent.
+  }
+  return request.copyWith(messages: messages);
 }
 
 /// Internal marker riding inside the auth-rejection [DioException]: carries

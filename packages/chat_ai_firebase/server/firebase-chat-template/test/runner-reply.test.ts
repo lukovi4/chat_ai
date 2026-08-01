@@ -23,7 +23,9 @@ import {
 import type { ChatRequest, WireTool } from '../src/core/wire';
 import type { ResolvedOpenAITier } from '../src/providers/openai/request';
 import {
+  compactionItemDone,
   functionCallDone,
+  makeCompactionItem,
   makeResponse,
   makeUsage,
   responseCompleted,
@@ -447,6 +449,46 @@ describe('server-side tool loop', () => {
       { type: 'text', text: 'found 3' },
     ]);
     expect(result.legs.map((leg) => leg.outcome.kind)).toEqual(['tool-call', 'done']);
+    expect(result.termination).toEqual({ kind: 'done' });
+  });
+
+  it('the tier compactThreshold rides every leg and the first leg Compact reaches the next', async () => {
+    const compaction = makeCompactionItem({ id: 'cmpt_leg0', encrypted_content: 'ENC-LEG0' });
+    const client = new FakeClient([
+      {
+        kind: 'events',
+        events: [
+          compactionItemDone(compaction),
+          functionCallDone({ outputIndex: 0, callId: 'call_1', name: 'search', arguments: '{"q":"notes"}' }),
+          responseCompleted(makeResponse({ usage: makeUsage(3, 3) })),
+        ],
+      },
+      textLeg('found 3'),
+    ]);
+    const result = await run(client, {
+      tier: { ...TIER, compactThreshold: 100_000 },
+      request: request({ tools: [SEARCH_TOOL] }),
+      onToolCall: () => ({ content: '3 notes' }),
+    });
+
+    expect(client.requests).toHaveLength(2);
+    // The same server-side tier setting on every billable leg.
+    expect(client.requests.map((sent) => sent.context_management)).toEqual([
+      [{ type: 'compaction', compact_threshold: 100_000 }],
+      [{ type: 'compaction', compact_threshold: 100_000 }],
+    ]);
+    // Leg 0's Compact was accumulated as ordinary opaque continuity…
+    expect(result.parts[0]).toEqual({
+      type: 'providerOpaque',
+      provider: 'openai',
+      data: Buffer.from(JSON.stringify(compaction), 'utf8').toString('base64'),
+    });
+    // …and rides into leg 1 verbatim, with the older history pruned around it.
+    expect(client.requests[1]!.input).toEqual([
+      compaction,
+      { type: 'function_call', call_id: 'call_1', name: 'search', arguments: '{"q":"notes"}' },
+      { type: 'function_call_output', call_id: 'call_1', output: '{"content":"3 notes","isError":false}' },
+    ]);
     expect(result.termination).toEqual({ kind: 'done' });
   });
 

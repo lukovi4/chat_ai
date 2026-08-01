@@ -140,6 +140,23 @@ export async function* translateOpenAIStream(
               const bytes = Buffer.from(JSON.stringify(item), 'utf8');
               yield { kind: 'provider_state', provider: 'openai', data: new Uint8Array(bytes) };
             }
+          } else if (item.type === 'compaction') {
+            // Server-side Compact state (automatic `context_management`). Unlike
+            // reasoning it is NOT optional continuity: it replaces the summarised
+            // history, so an incomplete item may never be silently dropped —
+            // continuing the reply without it would lose that history for good.
+            if (
+              typeof item.id !== 'string' ||
+              item.id.length === 0 ||
+              typeof item.encrypted_content !== 'string' ||
+              item.encrypted_content.length === 0 ||
+              (item.created_by !== undefined && typeof item.created_by !== 'string')
+            ) {
+              yield { kind: 'error', cause: 'upstream' };
+              return;
+            }
+            const bytes = Buffer.from(JSON.stringify(item), 'utf8');
+            yield { kind: 'provider_state', provider: 'openai', data: new Uint8Array(bytes) };
           } else if (item.type === 'function_call') {
             const outcome = registerCall(event.output_index, {
               callId: item.call_id,

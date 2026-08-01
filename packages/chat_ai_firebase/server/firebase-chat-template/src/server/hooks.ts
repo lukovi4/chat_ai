@@ -16,6 +16,14 @@ import type { ReasoningEffort } from 'openai/resources/shared';
  * setting only: when set it becomes the provider request's `reasoning.effort`;
  * when absent the provider request carries no `reasoning` key. Which efforts a
  * configured model supports is an OpenAI/provider-config contract.
+ *
+ * `compactThreshold` is the equally optional server-side Compact setting: when
+ * set it becomes the provider request's automatic
+ * `context_management: [{ type: 'compaction', compact_threshold }]`; when absent
+ * the request carries no `context_management` key and Compact stays off. The
+ * value must be a positive safe integer; whether the configured model supports
+ * it (and which value is sensible) is an OpenAI/provider-config contract owned
+ * by the deployment.
  */
 export type Tier = {
   id: string;
@@ -23,6 +31,7 @@ export type Tier = {
   model: string;
   maxOutputTokens: number;
   reasoningEffort?: Exclude<ReasoningEffort, null>;
+  compactThreshold?: number;
 };
 
 export type EntitlementResult =

@@ -756,4 +756,156 @@ void main() {
       }
     });
   });
+
+  group('wire-side Compact pruning', () {
+    Uint8List opaqueBytes(Object json) =>
+        Uint8List.fromList(utf8.encode(jsonEncode(json)));
+
+    Uint8List compactBytes(String id) => opaqueBytes({
+      'id': id,
+      'encrypted_content': 'ENC-$id',
+      'type': 'compaction',
+    });
+
+    final Uint8List reasoningBytes = opaqueBytes({
+      'id': 'rs_1',
+      'type': 'reasoning',
+      'summary': <Object>[],
+      'encrypted_content': 'ENC-rs',
+    });
+
+    Message msg(String id, MessageRole role, List<ContentPart> parts) =>
+        Message(
+          id: id,
+          role: role,
+          parts: parts,
+          status: role == MessageRole.user
+              ? MessageStatus.sent
+              : MessageStatus.complete,
+          attemptKey: role == MessageRole.system ? null : 'attempt-$id',
+          createdAt: DateTime.utc(2026, 7, 12, 12),
+        );
+
+    ChatRequest requestOf(List<Message> messages) => ChatRequest(
+      botId: 'premium',
+      system: 'be kind',
+      messages: messages,
+      tools: const [],
+      idempotencyKey: 'idem-key-1',
+    );
+
+    Future<String> bodySentFor(ChatRequest sent) async {
+      final (backend, adapter) = backendWith(
+        (options, cancel) async => sseResponse(['event: done\ndata: {}\n\n']),
+      );
+      await backend.send(sent).toList();
+      return adapter.lastBody!;
+    }
+
+    test(
+      'without a Compact item the JSON body stays exactly as before',
+      () async {
+        final noCompact = requestOf([
+          msg('s1', MessageRole.system, const [ContentPart.text('S1')]),
+          msg('u1', MessageRole.user, const [ContentPart.text('q1')]),
+          msg('a1', MessageRole.assistant, [
+            const ContentPart.text('a1'),
+            ContentPart.providerOpaque('openai', reasoningBytes),
+          ]),
+          msg('u2', MessageRole.user, const [ContentPart.text('q2')]),
+        ]);
+        expect(await bodySentFor(noCompact), encodeChatRequestBody(noCompact));
+      },
+    );
+
+    test(
+      'a malformed or foreign opaque item is not a boundary and rides on',
+      () async {
+        for (final part in [
+          // An OpenAI compaction item missing its required state.
+          ContentPart.providerOpaque(
+            'openai',
+            opaqueBytes({
+              'type': 'compaction',
+              'id': 'c',
+              'encrypted_content': '',
+            }),
+          ),
+          // An unknown opaque type.
+          ContentPart.providerOpaque(
+            'openai',
+            opaqueBytes({
+              'type': 'compaction-v2',
+              'id': 'c',
+              'encrypted_content': 'E',
+            }),
+          ),
+          // Malformed JSON bytes.
+          ContentPart.providerOpaque(
+            'openai',
+            Uint8List.fromList(utf8.encode('{"type":"compaction"')),
+          ),
+          // A valid compact shape, but for a foreign provider.
+          ContentPart.providerOpaque('anthropic', compactBytes('cmpt_x')),
+        ]) {
+          final unpruned = requestOf([
+            msg('u1', MessageRole.user, const [ContentPart.text('q1')]),
+            msg('a1', MessageRole.assistant, [
+              const ContentPart.text('a1'),
+              part,
+            ]),
+            msg('u2', MessageRole.user, const [ContentPart.text('q2')]),
+          ]);
+          expect(await bodySentFor(unpruned), encodeChatRequestBody(unpruned));
+        }
+      },
+    );
+
+    test('with Compact items the body is cut at the LAST one, keeping every '
+        'system Message and all later history', () async {
+      final withCompacts = requestOf([
+        msg('s1', MessageRole.system, const [ContentPart.text('S1')]),
+        msg('u1', MessageRole.user, const [ContentPart.text('old q')]),
+        msg('a1', MessageRole.assistant, [
+          const ContentPart.text('old a'),
+          ContentPart.providerOpaque('openai', compactBytes('cmpt_1')),
+        ]),
+        msg('u2', MessageRole.user, const [ContentPart.text('mid q')]),
+        msg('a2', MessageRole.assistant, [
+          const ContentPart.text('mid a'),
+          ContentPart.providerOpaque('openai', reasoningBytes),
+          ContentPart.providerOpaque('openai', compactBytes('cmpt_2')),
+          const ContentPart.text('after compact'),
+        ]),
+        msg('s2', MessageRole.system, const [ContentPart.text('S2')]),
+        msg('u3', MessageRole.user, const [ContentPart.text('new q')]),
+      ]);
+
+      // The exact expected wire copy: system Messages in their current order,
+      // the boundary Message from the compact part on, then all later history.
+      final expected = requestOf([
+        msg('s1', MessageRole.system, const [ContentPart.text('S1')]),
+        msg('a2', MessageRole.assistant, [
+          ContentPart.providerOpaque('openai', compactBytes('cmpt_2')),
+          const ContentPart.text('after compact'),
+        ]),
+        msg('s2', MessageRole.system, const [ContentPart.text('S2')]),
+        msg('u3', MessageRole.user, const [ContentPart.text('new q')]),
+      ]);
+
+      final body = await bodySentFor(withCompacts);
+      expect(body, encodeChatRequestBody(expected));
+      // Nothing older than the last Compact leaves the device.
+      expect(body, isNot(contains('old q')));
+      expect(body, isNot(contains('old a')));
+      expect(body, isNot(contains('mid q')));
+      expect(body, isNot(contains('mid a')));
+      expect(body, isNot(contains('cmpt_1')));
+      // The source request (and therefore the stored Conversation) is intact.
+      expect(withCompacts.messages, hasLength(7));
+      expect(withCompacts.messages[4].parts, hasLength(4));
+      // Re-sending the same request produces a byte-identical body.
+      expect(await bodySentFor(withCompacts), body);
+    });
+  });
 }

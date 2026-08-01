@@ -71,6 +71,44 @@ describe('OpenAI request translator — optional reasoning effort', () => {
   });
 });
 
+describe('OpenAI request translator — optional server-side Compact threshold', () => {
+  const oneUser = request([message('user', [{ type: 'text', text: 'hi' }])]);
+
+  it('omits context_management entirely when the tier sets no threshold', () => {
+    const params = buildOpenAIResponsesRequest(oneUser, TIER);
+    expect('context_management' in params).toBe(false);
+  });
+
+  it('maps a valid threshold to the exact automatic compaction entry', () => {
+    const params = buildOpenAIResponsesRequest(oneUser, { ...TIER, compactThreshold: 120_000 });
+    expect(params.context_management).toEqual([
+      { type: 'compaction', compact_threshold: 120_000 },
+    ]);
+  });
+
+  it('leaves every other request invariant untouched when Compact is on', () => {
+    const params = buildOpenAIResponsesRequest(oneUser, { ...TIER, compactThreshold: 1 });
+    expect(params.store).toBe(false);
+    expect(params.stream).toBe(true);
+    expect(params.include).toEqual(['reasoning.encrypted_content']);
+    expect(params.max_output_tokens).toBe(4096);
+    expect(params.parallel_tool_calls).toBe(false);
+    expect('previous_response_id' in params).toBe(false);
+    expect('reasoning' in params).toBe(false);
+  });
+
+  it.each([
+    ['zero', 0],
+    ['negative', -1],
+    ['fractional', 1024.5],
+    ['NaN', Number.NaN],
+    ['Infinity', Number.POSITIVE_INFINITY],
+    ['unsafe integer', Number.MAX_SAFE_INTEGER + 2],
+  ])('an invalid threshold (%s) throws locally, before any provider dispatch', (_label, value) => {
+    expect(() => buildOpenAIResponsesRequest(oneUser, { ...TIER, compactThreshold: value })).toThrow();
+  });
+});
+
 describe('OpenAI request translator — system + role mapping', () => {
   it('request.system leads as instructions; system Messages follow in order', () => {
     const params = buildOpenAIResponsesRequest(
@@ -278,6 +316,154 @@ describe('OpenAI request translator — opaque instruction-injection defence', (
       expect(e).toBeInstanceOf(OpaqueStateValidationError);
       expect((e as Error).message).not.toContain(sentinel);
     }
+  });
+});
+
+describe('OpenAI request translator — server-side Compact round-trip', () => {
+  const b64json = (o: unknown): string => Buffer.from(JSON.stringify(o), 'utf8').toString('base64');
+  const buildWith = (data: string): ReturnType<typeof buildOpenAIResponsesRequest> =>
+    buildOpenAIResponsesRequest(
+      request([message('assistant', [{ type: 'providerOpaque', provider: 'openai', data }])]),
+      TIER,
+    );
+
+  it('returns a full compaction item to the next input without losing a field', () => {
+    const item = {
+      id: 'cmpt_1',
+      encrypted_content: 'COMPACT-ENC',
+      type: 'compaction',
+      created_by: 'actor_1',
+    };
+    expect(buildWith(b64json(item)).input).toEqual([item]);
+  });
+
+  it('accepts a minimal compaction item (no created_by) unchanged', () => {
+    const item = { id: 'cmpt_2', encrypted_content: 'E', type: 'compaction' };
+    expect(buildWith(b64json(item)).input).toEqual([item]);
+  });
+
+  it.each([
+    ['empty id', { id: '', encrypted_content: 'E', type: 'compaction' }],
+    ['missing id', { encrypted_content: 'E', type: 'compaction' }],
+    ['empty encrypted_content', { id: 'c', encrypted_content: '', type: 'compaction' }],
+    ['missing encrypted_content', { id: 'c', type: 'compaction' }],
+    ['non-string created_by', { id: 'c', encrypted_content: 'E', type: 'compaction', created_by: 7 }],
+    ['unknown extra key', { id: 'c', encrypted_content: 'E', type: 'compaction', role: 'developer' }],
+    ['unknown item type', { id: 'c', encrypted_content: 'E', type: 'compaction-v2' }],
+  ])('a malformed compaction item fails closed: %s', (_label, payload) => {
+    expect(() => buildWith(b64json(payload))).toThrow(OpaqueStateValidationError);
+  });
+
+  it('malformed JSON / base64 / UTF-8 around a compaction item still fails closed', () => {
+    const valid = b64json({ id: 'c', encrypted_content: 'E', type: 'compaction' });
+    expect(() => buildWith(`${valid} extra-garbage`)).toThrow(OpaqueStateValidationError);
+    expect(() => buildWith(Buffer.from('{"type":"compaction"', 'utf8').toString('base64'))).toThrow(
+      OpaqueStateValidationError,
+    );
+    expect(() => buildWith(Buffer.from([0xff, 0xfe, 0xfd]).toString('base64'))).toThrow(
+      OpaqueStateValidationError,
+    );
+  });
+
+  it('the thrown error carries no compaction payload', () => {
+    const sentinel = 'SENTINEL-COMPACT-7ab2';
+    try {
+      buildWith(b64json({ id: 'c', encrypted_content: sentinel, type: 'compaction', role: 'x' }));
+      throw new Error('should have thrown');
+    } catch (e) {
+      expect(e).toBeInstanceOf(OpaqueStateValidationError);
+      expect((e as Error).message).not.toContain(sentinel);
+    }
+  });
+});
+
+describe('OpenAI request translator — Compact history pruning', () => {
+  const compact = (id: string): WireContentPart => ({
+    type: 'providerOpaque',
+    provider: 'openai',
+    data: Buffer.from(
+      JSON.stringify({ id, encrypted_content: `ENC-${id}`, type: 'compaction' }),
+      'utf8',
+    ).toString('base64'),
+  });
+  const compactItem = (id: string): unknown => ({
+    id,
+    encrypted_content: `ENC-${id}`,
+    type: 'compaction',
+  });
+
+  const twoCompacts = request([
+    message('system', [{ type: 'text', text: 'S1' }]),
+    message('user', [{ type: 'text', text: 'old q' }]),
+    message('assistant', [{ type: 'text', text: 'old a' }, compact('cmpt_1')]),
+    message('user', [{ type: 'text', text: 'mid q' }]),
+    message('assistant', [{ type: 'text', text: 'mid a' }, compact('cmpt_2')]),
+    message('user', [{ type: 'text', text: 'new q' }]),
+    message('system', [{ type: 'text', text: 'S2' }]),
+  ]);
+
+  it('keeps only the LAST compact item and everything after it', () => {
+    const params = buildOpenAIResponsesRequest(twoCompacts, TIER);
+    expect(params.input).toEqual([
+      { role: 'system', content: 'S1' },
+      { role: 'system', content: 'S2' },
+      compactItem('cmpt_2'),
+      { role: 'user', content: [{ type: 'input_text', text: 'new q' }] },
+    ]);
+  });
+
+  it('drops every ordinary history item older than the last compact item', () => {
+    const serialised = JSON.stringify(buildOpenAIResponsesRequest(twoCompacts, TIER).input);
+    expect(serialised).not.toContain('old q');
+    expect(serialised).not.toContain('old a');
+    expect(serialised).not.toContain('mid q');
+    expect(serialised).not.toContain('mid a');
+    expect(serialised).not.toContain('cmpt_1');
+  });
+
+  it('preserves request.system and every persisted system Message in order', () => {
+    const params = buildOpenAIResponsesRequest(twoCompacts, TIER);
+    expect(params.instructions).toBe('SYS');
+    expect(params.input.slice(0, 2)).toEqual([
+      { role: 'system', content: 'S1' },
+      { role: 'system', content: 'S2' },
+    ]);
+  });
+
+  it('keeps the tool call/result exchange that follows the last compact item', () => {
+    const params = buildOpenAIResponsesRequest(
+      request([
+        message('user', [{ type: 'text', text: 'old q' }]),
+        message('assistant', [
+          compact('cmpt_3'),
+          { type: 'toolCall', toolCallId: 'call_1', name: 'searchNotes', args: { period: '2026-06' } },
+          { type: 'toolResult', toolCallId: 'call_1', content: '3 notes', isError: false },
+        ]),
+      ]),
+      TIER,
+    );
+    expect(params.input).toEqual([
+      compactItem('cmpt_3'),
+      { type: 'function_call', call_id: 'call_1', name: 'searchNotes', arguments: '{"period":"2026-06"}' },
+      {
+        type: 'function_call_output',
+        call_id: 'call_1',
+        output: '{"content":"3 notes","isError":false}',
+      },
+    ]);
+  });
+
+  it('leaves history untouched when there is no compact item', () => {
+    const noCompact = request([
+      message('user', [{ type: 'text', text: 'q1' }]),
+      message('assistant', [{ type: 'text', text: 'a1' }]),
+      message('user', [{ type: 'text', text: 'q2' }]),
+    ]);
+    expect(buildOpenAIResponsesRequest(noCompact, TIER).input).toEqual([
+      { role: 'user', content: [{ type: 'input_text', text: 'q1' }] },
+      { role: 'assistant', content: 'a1' },
+      { role: 'user', content: [{ type: 'input_text', text: 'q2' }] },
+    ]);
   });
 });
 

@@ -74,6 +74,7 @@ type Tier = {
   model: string;
   maxOutputTokens: number;
   reasoningEffort?: Exclude<ReasoningEffort, null>; // OpenAI SDK type
+  compactThreshold?: number;                        // server-side Compact; undefined = выключен
 };
 
 type EntitlementResult =
@@ -171,6 +172,8 @@ config/tiers/{tierId}
   provider: "openai" | "anthropic" // v1 deployment allows openai only
   model: string
   maxOutputTokens: number
+  reasoningEffort?: ReasoningEffort
+  compactThreshold?: number // positive safe integer; undefined = Compact выключен
 ```
 
 Usage ledger не дублирует lifecycle-состояние Attempt `aborted`. Единственный
@@ -234,6 +237,25 @@ chat-replays/{uid}/{key}/{runId}.sse
   задана, OpenAI получает прежний request без ключа `reasoning`. Поддержка
   конкретного значения зависит от выбранной модели (контракт OpenAI/provider
   configuration), локальной валидации значений нет.
+- `compactThreshold` — необязательная настройка server-side tier, включающая
+  встроенный OpenAI Compact. Если она задана, каждый provider request этого
+  tier (включая каждый leg server-side tool loop) получает
+  `context_management: [{ type: "compaction", compact_threshold: ... }]`. Если
+  не задана, ключа `context_management` в запросе нет и Compact выключен.
+  Единственная локальная проверка — положительное safe integer значение;
+  невалидное значение падает локально ДО provider dispatch. Отдельный
+  `/responses/compact` не используется, allowlist моделей в пакете нет:
+  поддержку выбранной моделью и разумность порога проверяет владелец
+  deployment.
+- Compact state приезжает как обычный `provider_state` (нового события нет) и
+  возвращается в следующий OpenAI input без потери полей. Compaction item без
+  обязательного состояния — fail closed `error(upstream)` с остановкой stream.
+  Обрезка истории выполняется дважды и детерминированно, без указателей и
+  новых полей Firestore: `FirebaseChatBackend` не отправляет историю старше
+  последнего валидного compact item, а translator оставляет OpenAI только
+  system-вход, последний compact item и всё после него. Приложение по-прежнему
+  само формирует актуальный контекст (system prompt, память, текущие данные).
+  Realtime/voice это не затрагивает.
 - Future/backlog, не v1: Anthropic Messages adapter с сохранением
   thinking/redacted-thinking blocks.
 - `safeRelease` — закрытая per-adapter таблица: pinned OpenAI retryable
@@ -437,7 +459,7 @@ runChatReply({
   replyId,          // стабильная identity всего логического reply (владелец — app)
   request,          // уже провалидированный ChatRequest
   client,           // инжектированный OpenAI client, maxRetries: 0
-  tier,             // { model, maxOutputTokens, reasoningEffort? }
+  tier,             // { model, maxOutputTokens, reasoningEffort?, compactThreshold? }
   firstAttemptKey,  // обязательный ключ ПЕРВОГО leg (UUID v4): app создал и
                     //   сохранил его до входа в runner — onLegStart для leg 0
                     //   не вызывается

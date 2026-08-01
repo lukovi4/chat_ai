@@ -647,6 +647,7 @@ async function runOwner(
       model: tier.model,
       maxOutputTokens: tier.maxOutputTokens,
       reasoningEffort: tier.reasoningEffort,
+      compactThreshold: tier.compactThreshold,
     });
   } catch {
     await ownerAdmissionExit(deps, res, uid, attemptKey, runId, { status: 502, cause: 'upstream' }, reservation, replayTtlMs);

@@ -146,6 +146,30 @@ export function reasoningItemDone(
   };
 }
 
+/** A complete compaction output item (server-side Compact state). */
+export function makeCompactionItem(
+  overrides: Partial<Responses.ResponseCompactionItem> = {},
+): Responses.ResponseCompactionItem {
+  return {
+    id: 'cmpt_test',
+    encrypted_content: 'COMPACT-ENCRYPTED',
+    type: 'compaction',
+    ...overrides,
+  };
+}
+
+export function compactionItemDone(
+  item: Responses.ResponseCompactionItem,
+  outputIndex = 0,
+): Responses.ResponseOutputItemDoneEvent {
+  return {
+    type: 'response.output_item.done',
+    item,
+    output_index: outputIndex,
+    sequence_number: next(),
+  };
+}
+
 export function refusalDone(refusal = 'I cannot help with that.'): Responses.ResponseRefusalDoneEvent {
   return {
     type: 'response.refusal.done',

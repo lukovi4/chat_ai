@@ -60,6 +60,47 @@ repeat 5xx/timeouts invisibly underneath the idempotency record.
   the request carries no `reasoning` key at all, exactly as before. Whether a
   given effort value is supported is a property of the configured model
   (OpenAI/provider configuration); the proxy does not validate it locally.
+- **`compactThreshold` is an optional server-tier setting** (never a client
+  field) enabling OpenAI's built-in **server-side Compact**. When a tier sets
+  it, every provider request built for that tier — including every leg of a
+  server-side tool loop — carries
+  `context_management: [{ type: "compaction", compact_threshold: <compactThreshold> }]`.
+  When the tier does not set it, the request carries no `context_management`
+  key at all and Compact is off. The only local check is that the value is a
+  positive safe integer; an invalid value fails locally BEFORE provider
+  dispatch. Whether the configured model supports compaction, and which
+  threshold is sensible, is an OpenAI/provider-config contract owned by the
+  deployment — the package ships no model allowlist. The separate
+  `/responses/compact` endpoint is deliberately NOT used.
+- **Compact state is ordinary opaque continuity.** A complete
+  `ResponseCompactionItem` on the stream (`type:"compaction"`, non-empty `id`
+  and `encrypted_content`, optional string `created_by`) is serialised whole
+  and emitted as the existing `provider_state` event — no new event kind. A
+  compaction item that arrives WITHOUT its required state fails closed as
+  `error(upstream)` and ends the stream: the reply is never continued without
+  the compact state that replaces the summarised history. On the way back the
+  item passes its own strict validation and is returned to OpenAI input
+  unchanged, exactly like a reasoning item; every deviation stays a fail-closed
+  opaque-state failure that never leaks the payload.
+- **Compact pruning happens twice, deterministically, with no stored pointer.**
+  Before the HTTP call the Flutter `FirebaseChatBackend` builds a wire copy of
+  the request that keeps every system Message, the Message holding the LAST
+  valid OpenAI compact item (from that part on) and all later history — the
+  stored `Conversation` and the incoming `ChatRequest` are never modified, and
+  a request without a compact item produces the exact same JSON body as before.
+  Before the provider call the translator does the same on the translated
+  input: `instructions`, every system input item, the last compaction item and
+  everything after it survive; ordinary history older than it is dropped. With
+  several compaction items only the last one is used. A malformed, unknown or
+  foreign opaque item is never a Compact boundary **by itself**: when no newer
+  valid Compact exists the request is not pruned around it, so it rides to the
+  server and meets the fail-closed contract above; when a newer valid Compact
+  does exist it is dropped as part of the old prefix, together with all
+  ordinary history before that last Compact.
+- **Core trimming and Compact are mutually exclusive.** The Firebase Compact
+  path runs with `ChatSession.trimBudget: null` (the default). Otherwise the
+  Core's local newest-that-fit trimming drops whole Messages before the request
+  ever reaches `FirebaseChatBackend` and can remove the Compact boundary itself.
 - **Future/backlog reference — not v1:** Anthropic Messages API with
   `anthropic-version: 2023-06-01`. Complete `thinking` and
   `redacted_thinking` blocks (including signatures) are emitted as

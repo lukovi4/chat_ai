@@ -15,17 +15,24 @@ import { ChatRequest, WireContentPart, WireMessage } from '../../core/wire';
 import { assertValidToolset } from '../../core/tool-schema';
 
 /**
- * The resolved OpenAI tier for one leg: the concrete model, its output cap and
- * an optional reasoning effort (server config, ADR 0001). The full deploy-time
- * `Tier`/entitlement hook type is a later increment; the translator needs only
- * these fields. `reasoningEffort` is passed through verbatim — whether a given
- * effort is supported by the configured model stays an OpenAI/provider-config
- * contract, not a local validation.
+ * The resolved OpenAI tier for one leg: the concrete model, its output cap, an
+ * optional reasoning effort and an optional server-side Compact threshold
+ * (server config, ADR 0001). The full deploy-time `Tier`/entitlement hook type
+ * is a later increment; the translator needs only these fields.
+ * `reasoningEffort` is passed through verbatim — whether a given effort is
+ * supported by the configured model stays an OpenAI/provider-config contract,
+ * not a local validation.
+ *
+ * `compactThreshold` absent ⇒ Compact is OFF and the request carries no
+ * `context_management` key at all. When present it must be a positive safe
+ * integer (the only local check); the value itself and the configured model's
+ * support for it stay an OpenAI/provider-config contract.
  */
 export interface ResolvedOpenAITier {
   model: string;
   maxOutputTokens: number;
   reasoningEffort?: Exclude<ReasoningEffort, null>;
+  compactThreshold?: number;
 }
 
 /**
@@ -137,11 +144,39 @@ function validateReasoningItem(decoded: unknown): Responses.ResponseReasoningIte
   return decoded as unknown as Responses.ResponseReasoningItem;
 }
 
+/** The exact key set of a compaction item in the installed OpenAI SDK. */
+const COMPACTION_ITEM_KEYS = new Set(['id', 'encrypted_content', 'type', 'created_by']);
+
+/**
+ * Validates that a decoded object is EXACTLY a full OpenAI `ResponseCompactionItem`
+ * of the installed SDK — `type:"compaction"`, a non-empty `id` and
+ * `encrypted_content`, an optional string `created_by`, and only those keys —
+ * and returns it UNCHANGED (no reconstruction, no field loss). Every deviation
+ * (unknown key, empty/missing required field, a non-string `created_by`) fails
+ * closed, so a `providerOpaque` part can never smuggle a foreign input item in
+ * under a compaction discriminator.
+ */
+function validateCompactionItem(decoded: Record<string, unknown>): Responses.ResponseCompactionItem {
+  for (const key of Object.keys(decoded)) {
+    if (!COMPACTION_ITEM_KEYS.has(key)) throw new OpaqueStateValidationError();
+  }
+  if (typeof decoded.id !== 'string' || decoded.id.length === 0) throw new OpaqueStateValidationError();
+  if (typeof decoded.encrypted_content !== 'string' || decoded.encrypted_content.length === 0) {
+    throw new OpaqueStateValidationError();
+  }
+  if (decoded.created_by !== undefined && typeof decoded.created_by !== 'string') {
+    throw new OpaqueStateValidationError();
+  }
+  // Safe local narrowing after exhaustive runtime validation above; returned
+  // unchanged, with every allowed field preserved.
+  return decoded as unknown as Responses.ResponseCompactionItem;
+}
+
 /**
  * Maps a matching-provider (OpenAI) opaque continuity part back to its input
  * item: strict canonical base64 → strict UTF-8 → JSON object → exact reasoning
- * item. Any deviation is a local upstream validation failure that never leaks
- * the payload.
+ * OR compaction item. Any deviation is a local upstream validation failure that
+ * never leaks the payload.
  */
 function opaqueToInputItem(base64Data: string): InputItem {
   const bytes = decodeCanonicalBase64(base64Data);
@@ -152,7 +187,12 @@ function opaqueToInputItem(base64Data: string): InputItem {
   } catch {
     throw new OpaqueStateValidationError();
   }
-  return validateReasoningItem(decoded);
+  if (!isRecord(decoded)) throw new OpaqueStateValidationError();
+  // The reasoning item keeps its existing validation untouched; server-side
+  // Compact state gets its own equally strict one. Anything else fails closed.
+  return decoded.type === 'compaction'
+    ? validateCompactionItem(decoded)
+    : validateReasoningItem(decoded);
 }
 
 /** Maps a user Message's parts to Responses input content (text + image). */
@@ -236,6 +276,31 @@ function assistantItems(message: WireMessage): InputItem[] {
   return items;
 }
 
+/**
+ * The only local check on the server-side Compact threshold: absent (Compact
+ * off) or a positive safe integer. A zero, negative, fractional, non-finite or
+ * unsafe value is a local configuration fault raised BEFORE any provider
+ * dispatch; the stable message carries no request payload.
+ */
+function assertValidCompactThreshold(compactThreshold: number | undefined): void {
+  if (compactThreshold === undefined) return;
+  if (!Number.isSafeInteger(compactThreshold) || compactThreshold <= 0) {
+    throw new Error('tier.compactThreshold must be a positive safe integer');
+  }
+}
+
+/**
+ * Index of the LAST compaction item in the translated history, or `-1`. Every
+ * compaction item that reaches this point already passed
+ * {@link validateCompactionItem}, so the discriminator alone identifies it.
+ */
+function lastCompactionIndex(items: readonly InputItem[]): number {
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    if ((items[index] as { type?: unknown }).type === 'compaction') return index;
+  }
+  return -1;
+}
+
 /** Maps validated tool declarations to strict Responses function tools. */
 function functionTools(request: ChatRequest): Responses.FunctionTool[] | undefined {
   const tools = request.tools;
@@ -260,12 +325,23 @@ function functionTools(request: ChatRequest): Responses.FunctionTool[] | undefin
  * fields (`id`, `status`, `createdAt`, `attemptKey`) never reach the request.
  *
  * `tier.reasoningEffort` maps to `reasoning: { effort }`; when it is absent the
- * `reasoning` key is absent from the request entirely.
+ * `reasoning` key is absent from the request entirely. `tier.compactThreshold`
+ * maps the same way to `context_management: [{ type:'compaction',
+ * compact_threshold }]`.
+ *
+ * Compact pruning: when the translated history contains compaction items, only
+ * the LAST one and everything after it are sent — the ordinary history before
+ * it is exactly what that item already summarises. `request.system` and every
+ * persisted system Message survive pruning unconditionally, in their current
+ * order. Pruning is independent of `compactThreshold`: a compact item in the
+ * history is a boundary even when the tier no longer enables Compact.
  */
 export function buildOpenAIResponsesRequest(
   request: ChatRequest,
   tier: ResolvedOpenAITier,
 ): Responses.ResponseCreateParamsStreaming {
+  assertValidCompactThreshold(tier.compactThreshold);
+
   const systemInput: InputItem[] = [];
   const historyInput: InputItem[] = [];
 
@@ -285,6 +361,11 @@ export function buildOpenAIResponsesRequest(
 
   const tools = functionTools(request);
 
+  // Compact pruning happens on the translated history only, so the system input
+  // built above is never touched.
+  const boundary = lastCompactionIndex(historyInput);
+  const prunedHistory = boundary < 0 ? historyInput : historyInput.slice(boundary);
+
   const params: Responses.ResponseCreateParamsStreaming = {
     model: tier.model,
     stream: true,
@@ -293,13 +374,21 @@ export function buildOpenAIResponsesRequest(
     max_output_tokens: tier.maxOutputTokens,
     parallel_tool_calls: false,
     instructions: request.system,
-    input: [...systemInput, ...historyInput],
+    input: [...systemInput, ...prunedHistory],
   };
   if (tools !== undefined) {
     params.tools = tools;
   }
   if (tier.reasoningEffort !== undefined) {
     params.reasoning = { effort: tier.reasoningEffort };
+  }
+  if (tier.compactThreshold !== undefined) {
+    params.context_management = [
+      {
+        type: 'compaction',
+        compact_threshold: tier.compactThreshold,
+      },
+    ];
   }
   return params;
 }
