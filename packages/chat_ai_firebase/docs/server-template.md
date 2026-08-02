@@ -547,8 +547,11 @@ await store.finishReply(replyId, result.termination, result.parts, result.usage)
   вводит новый wire, который связывал бы их напрямую: как события reply
   доходят до клиента, решает приложение. Runner естественно ложится на
   server-managed режим (server-owned tool loop, ключ первого leg — тот же
-  `firstAttemptKey`, который клиент уже сохранил), но эта связка — композиция
-  приложения, а не контракт пакета.
+  `firstAttemptKey`); в этом режиме он приходит как
+  `ChatRequest.idempotencyKey` и фиксируется самой atomic admission
+  (`admitReply` сохраняет snapshot вместе с Job в одной транзакции), а **не**
+  отдельным клиентским Dart-checkpoint'ом — его в этом режиме нет. Но эта
+  связка — композиция приложения, а не контракт пакета.
 
 ## Деплой под новое приложение
 

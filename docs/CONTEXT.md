@@ -231,6 +231,15 @@ follows it, first attempts free recovery under the persisted key and merely
 authorises one fresh-key fallback. Any new spend therefore follows a deliberate
 command. A `failed` user Message uses **Resend**, not Regenerate.
 
+**With a `ServerManagedDurableChatBackend` every regenerate is that new
+Attempt.** There the whole reply is one server-side Job addressed by its
+`replyId`, and re-admitting the same `replyId` means "transport duplicate —
+join the existing Job", so it could never re-run anything. An explicit
+regenerate must be distinguishable from that duplicate: the old reply leaves the
+active branch and the Core admits a **new logical reply** with a new
+`attemptKey` and a new `replyId`. Resend of a proven pre-`accepted` refusal is
+unaffected — its key was never spent, so it stays the same-key path.
+
 **The Core truncates without asking** — the command comes from the app, and
 whether to warn the user first ("this will rewrite the conversation") is the
 app's policy. This matches the leaders: ChatGPT and Claude edit without any
@@ -440,13 +449,14 @@ Resend after an app restart is still the *same* logical call), and an
 assistant Message carries the key of its current/last leg (updated through the
 Tool Use Cycle, so a recovery repeat targets the right leg). The Core awaits the
 Consuming App's persistence checkpoint before each billable dispatch **it owns**:
-`send` with a plain backend, `startReply` on the durable paths, and — with a
-server-managed durable backend — only the single `startReply` that carries the
-first leg's key, because the server-owned legs after it are checkpointed by the
-app on its own server (its awaited `runChatReply.onLegStart`), not here. A silent
-retry of an already-checkpointed Attempt does not checkpoint again. If an app
-persists chats across launches, providing that checkpoint is part of the storage
-contract. Within a live
+`send` with a plain backend, `startReply` with a client-owned `DurableChatBackend`.
+A silent retry of an already-checkpointed Attempt does not checkpoint again. If an
+app persists chats across launches, providing that checkpoint is part of the storage
+contract — **except** with a `ServerManagedDurableChatBackend`, where the checkpoint
+is forbidden and the app's server persists the snapshot itself, atomically with the
+Job, inside the single `admitReply` (the first leg's key rides along as
+`ChatRequest.idempotencyKey`); the server-owned legs after it are persisted by the
+app on its own server (its awaited `runChatReply.onLegStart`), not here. Within a live
 Attempt the Core freezes the assembled request and silent retries re-send it
 **byte-identical** — the same-key-different-params conflict (`409`) is a bug
 by construction. This guards the one place the Package spends money, the same
@@ -684,16 +694,27 @@ user's Cancel — which fires exactly one remote cancel **per logical reply** (t
 next reply of the same session is cancellable in turn).
 
 **Two durable modes, one of which moves the Tool Use Cycle to the server.** The
-capability a backend declares decides the owner: with `DurableChatBackend` the
-tool loop stays the Core's, and each leg is started by the Core; with
-`ServerManagedDurableChatBackend` the server owns the WHOLE logical reply —
-its tools and all its provider legs — so the Core starts it once, observes
-`accepted`/`delta`/`done`/`error` and never resolves a tool call itself.
+capability a backend declares decides the owner — they are two separate
+contracts, and a backend declares one of them:
+
+- with `DurableChatBackend` the tool loop stays the Core's, each leg is started
+  by the Core, and admission stays **two-step**: the app's `checkpoint` saves
+  the Messages, then `startReply` starts the leg;
+- with `ServerManagedDurableChatBackend` the server owns the WHOLE logical
+  reply — its tools and all its provider legs — so the Core observes
+  `accepted`/`delta`/`done`/`error` and never resolves a tool call itself. Here
+  admission is **one call**: `admitReply(replyId, request, snapshot)` hands the
+  server the exact Conversation to save together with the Job, in one
+  transaction, so a crash can never leave "Messages saved, no Job". Its
+  `accepted` IS that commit's receipt, and a separate Dart `checkpoint` is
+  forbidden in this mode (`ArgumentError`) precisely because it would put the
+  two-step gap back.
 
 **None of this means the kit ships a running backend.** Both durable
-capabilities are *contracts*: the long-running generation, its store, its host,
-its admission/quota/idempotency and its retry policy are the app's. The package
-ships no production durable backend implementation — see README.md §11.
+capabilities are *contracts*: the atomic admission, the Job, the long-running
+generation, its store, its host, its quota/idempotency and its retry policy are
+the app's. The package ships no production durable backend implementation —
+see README.md §11.
 
 ### Content Part
 One piece of a Message's content. Product-visible kinds: **text**, **image**,

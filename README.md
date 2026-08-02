@@ -247,12 +247,15 @@ await session.dispose();
 
 Что именно бросается, а что приходит данными:
 
-- **исходы stream'а `send` / `startReply` представлены `BackendEvent`** —
+- **исходы stream'а `send` / `startReply` / `admitReply` представлены
+  `BackendEvent`** —
   операционный сбой провайдера или транспорта приходит как событие и попадает в
   `ConversationState`; stream errors из этого потока выходить не должны;
 - **ошибки валидации и программные ошибки бросаются** согласно API: неверная
-  числовая или tool-конфигурация — `ArgumentError`, неверная восстановленная
-  история — `FormatException`, команда после `dispose()` — `StateError`;
+  числовая или tool-конфигурация — `ArgumentError` (сюда же относится
+  `ServerManagedDurableChatBackend` вместе с ненулевым `checkpoint`), неверная
+  восстановленная история — `FormatException`, команда после `dispose()` —
+  `StateError`;
 - **неизвестный статус `attachReply` намеренно пробрасывается** из
   `ChatSession.open`, чтобы Core не нормализовал потенциально живой reply.
 
@@ -521,12 +524,16 @@ final session = ChatSession(
   он покрывает, зависит от backend'а:
   - обычный `ChatBackend` и `DurableChatBackend` — Core дожидается checkpoint
     **перед каждым потенциально платным запросом, которым владеет сам** (первый
-    leg, tool-leg, единственный fresh-key fallback);
-  - `ServerManagedDurableChatBackend` — Dart-checkpoint выполняется **перед
-    единственным `startReply`** и сохраняет **ключ первого leg**; последующие
-    server-owned legs фиксирует уже приложение на своём сервере — через awaited
-    `runChatReply.onLegStart` (раздел 11). Dart-checkpoint перед server-owned
-    legs **не вызывается**.
+    leg, tool-leg, единственный fresh-key fallback); admission здесь
+    **двухшаговый**: checkpoint, затем `startReply`;
+  - `ServerManagedDurableChatBackend` — Dart-checkpoint **запрещён**:
+    `ChatSession` и `ChatSession.open` бросают `ArgumentError` синхронно, до
+    любого обращения к backend'у. Снапшот сохраняет сам сервер — атомарно
+    вместе с Job внутри единственного
+    `admitReply(replyId, request, snapshot)` (раздел 11), поэтому ключ первого
+    leg фиксируется там же и разрыва «Messages сохранены, Job не создан» не
+    существует. Последующие server-owned legs фиксирует приложение на своём
+    сервере — через awaited `runChatReply.onLegStart`.
 - **Обычный конструктор.** Нормализует «зависшие» статусы восстановленной
   истории: `sending → failed`, `streaming → interrupted`, и проверяет
   инварианты схемы v1. Это безусловное поведение конструктора.
@@ -563,14 +570,16 @@ final session = ChatSession(
 
 1. **два Dart-контракта** — `DurableChatBackend` и
    `ServerManagedDurableChatBackend`;
-2. **поддержку start / attach / cancel в `ChatSession`** (`ChatSession.open`,
-   detach vs remote cancel, замена partial'а при replay);
+2. **поддержку start-или-admit / attach / cancel в `ChatSession`**
+   (`ChatSession.open`, detach vs remote cancel, замена partial'а при replay);
 3. **Node `runChatReply`** — выполнение одного полного server-side logical
    reply.
 
 Всё остальное приложение обязано построить и соединить самостоятельно:
 
-- транспорт start / attach / cancel;
+- транспорт start-или-admit / attach / cancel;
+- atomic admission (в server-managed режиме — одна транзакция
+  «сохранить snapshot + создать Job»);
 - Job (запись о reply);
 - worker host, в котором reply реально выполняется;
 - store событий и самого reply;
@@ -583,18 +592,55 @@ final session = ChatSession(
 
 Два режима различаются владельцем tool-loop:
 
-**`DurableChatBackend`**
+Это **два независимых контракта**: `ServerManagedDurableChatBackend` **не**
+наследует `DurableChatBackend` — оба лишь `implements ChatBackend`.
+
+**`DurableChatBackend`** (двухшаговый, не изменён)
 
 - **tool-loop принадлежит Core**;
+- admission — **два шага**: Dart-`checkpoint`, затем `startReply`;
 - `startReply` запускает **один leg**; следующий leg — снова `startReply` с тем
   же `replyId` и новым checkpoint'нутым `attemptKey`.
 
-**`ServerManagedDurableChatBackend`**
+**`ServerManagedDurableChatBackend`** (одношаговый admission)
 
 - **сервер владеет всем logical reply**, включая tools и все provider legs;
-- `startReply` вызывается **ровно один раз** на logical reply;
+- вместо `startReply` — `admitReply(replyId, request, snapshot)`, вызываемый
+  **ровно один раз** на logical reply:
+  - `replyId` — id пустого `streaming`-ассистента,
+  - `request` — замороженный запрос **первого leg**,
+  - `snapshot` — точный замороженный `Conversation` (user Message + этот
+    пустой ассистент), зафиксированный до обработки событий reply;
+- backend приложения обязан **одной серверной транзакцией** сохранить этот
+  snapshot и создать (или безопасно присоединиться к) единственный Job этого
+  `replyId`; provider нельзя запускать до commit;
+- `accepted` — расписка об этом commit'е: первое успешное событие стрима,
+  означающее, что транзакция Messages + Job зафиксирована; повторная
+  транспортная доставка того же admission не создаёт второй Job;
+- ошибка до `accepted` допустима только как **подтверждённый отказ** admission
+  (Job не создан, provider не запускался) — неопределённый сетевой исход
+  сначала разрешается по `replyId` и отказом считаться не может;
+- Core различает две одинаковые на вид pre-token ошибки по `accepted`:
+  - **до `accepted`** — отказ: пустой assistant удаляется, user становится
+    `failed`, recovery — `resend` под тем же (непотраченным) ключом;
+  - **после `accepted`, но до первой delta** — admission уже committed: пустой
+    assistant удаляется, user остаётся `sent`, терминал —
+    `Failed(..., FailurePhase.sending)`, recovery — `regenerate`;
+  - **после видимой delta** — как везде: partial сохраняется в `interrupted`
+    assistant, `Failed(..., FailurePhase.streaming)`, recovery — `regenerate`;
+- `replyId` admits **не более одного раза**, поэтому два вида «повторного
+  admission» не смешиваются: тот же `replyId` — это транспортный дубль, который
+  join'ит существующий Job; explicit `regenerate()` — это **новый logical
+  reply** с новым `attemptKey` и новым `replyId` (предыдущий ответ уходит из
+  активной ветки). Recover-before-rebill в этом режиме не применяется; для
+  обычного и client-owned durable он не изменён;
+- `cancelReply` обязан быть идемпотентным и race-safe с незавершённым
+  admission: cancel после `admitReply`, но до `accepted`, не теряется;
+- отдельный Dart-`checkpoint` в этом режиме **запрещён** (`ArgumentError`);
 - наблюдаемый stream содержит только `accepted` / `delta` / `done` / `error`;
-- профиль с tools допустим без клиентского `onToolCall`.
+- профиль с tools допустим без клиентского `onToolCall`;
+- саму atomic-транзакцию, Job, store и admission endpoint реализует
+  **приложение** — пакет по-прежнему не поставляет production durable backend.
 
 Про Node `runChatReply` (`packages/chat_ai_firebase/server/firebase-chat-template`,
 импорт из `src/runner`):

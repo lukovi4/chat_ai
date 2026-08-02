@@ -63,11 +63,73 @@ class ManualDurableBackend implements DurableChatBackend {
   }
 }
 
-/// The same manual transport, declaring the SERVER-MANAGED variant: the server
-/// owns the whole logical reply and its tool loop, so this session only starts,
+/// A fully manual SERVER-MANAGED transport — deliberately a SEPARATE minimal
+/// double, never a subclass of [ManualDurableBackend]: the two durable modes
+/// are distinct contracts and a double must declare exactly one of them (this
+/// one is provably not a [DurableChatBackend], so no `startReply` exists on
+/// it at all).
+///
+/// The server owns the whole logical reply: this session admits it once,
 /// observes, re-attaches and cancels it.
-class ManualServerManagedBackend extends ManualDurableBackend
-    implements ServerManagedDurableChatBackend {}
+class ManualServerManagedBackend implements ServerManagedDurableChatBackend {
+  final List<String> admittedReplyIds = [];
+  final List<ChatRequest> requests = [];
+  final List<Conversation> snapshots = [];
+  final List<String> attachedReplyIds = [];
+  final List<String> cancelledReplyIds = [];
+  final List<StreamController<BackendEvent>> _controllers = [];
+  int cancelledSubscriptions = 0;
+  int sendCalls = 0;
+
+  /// Scripted answer of the next [attachReply]; `null` means "proven absent".
+  Stream<BackendEvent>? Function(String replyId)? onAttach;
+
+  StreamController<BackendEvent> get current => _controllers.last;
+
+  void emit(BackendEvent event) => current.add(event);
+
+  /// A fresh hand-pushed observation stream (also the scriptable answer of
+  /// [attachReply]).
+  Stream<BackendEvent> open() {
+    late final StreamController<BackendEvent> controller;
+    controller = StreamController<BackendEvent>(
+      onCancel: () {
+        cancelledSubscriptions++;
+      },
+    );
+    _controllers.add(controller);
+    return controller.stream;
+  }
+
+  @override
+  Stream<BackendEvent> send(ChatRequest request) {
+    sendCalls++;
+    throw StateError('the server-managed path must never call send()');
+  }
+
+  @override
+  Stream<BackendEvent> admitReply(
+    String replyId,
+    ChatRequest request,
+    Conversation snapshot,
+  ) {
+    admittedReplyIds.add(replyId);
+    requests.add(request);
+    snapshots.add(snapshot);
+    return open();
+  }
+
+  @override
+  Future<Stream<BackendEvent>?> attachReply(String replyId) async {
+    attachedReplyIds.add(replyId);
+    return onAttach?.call(replyId);
+  }
+
+  @override
+  Future<void> cancelReply(String replyId) async {
+    cancelledReplyIds.add(replyId);
+  }
+}
 
 /// A tools profile whose resolver is deliberately absent: legal only because
 /// the tool loop belongs to the server.
@@ -572,10 +634,13 @@ void main() {
 
   group('server-managed durable reply', () {
     test(
-      'a tools profile runs without a client resolver, one startReply',
+      'one send is ONE admitReply carrying the exact replyId, frozen request '
+      'and snapshot',
       () async {
         final backend = ManualServerManagedBackend();
-        // Tools without onToolCall: legal ONLY because the loop is the server's.
+        // Tools without onToolCall: legal ONLY because the loop is the
+        // server's — and it makes a client resolver call structurally
+        // impossible for this reply.
         final session = makeSession(
           backend: backend,
           botProfile: serverToolProfile,
@@ -583,15 +648,59 @@ void main() {
         addTearDown(session.dispose);
 
         await session.send('hi');
+
+        // ONE admission for the whole logical reply, and no other dispatch is
+        // even reachable: the contract is not a DurableChatBackend (no
+        // `startReply` exists on it) and `send` was never called.
+        expect(backend.admittedReplyIds, hasLength(1));
+        expect(backend.requests, hasLength(1));
+        expect(backend.snapshots, hasLength(1));
+        expect(backend.sendCalls, 0);
+        expect(backend, isNot(isA<DurableChatBackend>()));
+
+        final replyId = backend.admittedReplyIds.single;
+        final request = backend.requests.single;
+        final admitted = backend.snapshots.single;
+
+        // The admitted snapshot is exactly what the Core held at that moment:
+        // this turn's user Message plus the EMPTY `streaming` assistant whose
+        // id IS the replyId.
+        expect(admitted.messages, hasLength(2));
+        final user = admitted.messages.first;
+        final assistant = admitted.messages.last;
+        expect(user.role, MessageRole.user);
+        expect(user.status, MessageStatus.sending);
+        expect(assistant.role, MessageRole.assistant);
+        expect(assistant.id, replyId);
+        expect(assistant.status, MessageStatus.streaming);
+        expect(assistant.parts, isEmpty);
+        expect(session.snapshot.messages.last.id, replyId);
+
+        // ONE first-leg attemptKey: the frozen request and both anchors of the
+        // admitted snapshot carry the same key…
+        expect(request.idempotencyKey, isNotNull);
+        expect(user.attemptKey, request.idempotencyKey);
+        expect(assistant.attemptKey, request.idempotencyKey);
+
+        // …while the provider-effective request excludes that assistant.
+        expect(
+          request.messages.where(
+            (message) => message.role == MessageRole.assistant,
+          ),
+          isEmpty,
+        );
+
+        // The admitted snapshot is FROZEN: the reply's own deltas and its
+        // terminal never leak into the value the server was handed.
         backend.emit(const BackendEvent.accepted());
         backend.emit(const BackendEvent.delta('server did the tools'));
         backend.emit(const BackendEvent.done());
         await waitForState(session, (state) => state is Done);
 
-        // ONE startReply for the whole logical reply — the tool leg the server
-        // ran in between never became a client dispatch.
-        expect(backend.startedReplyIds, hasLength(1));
-        expect(backend.requests, hasLength(1));
+        expect(backend.admittedReplyIds, hasLength(1));
+        expect(admitted.messages.last.parts, isEmpty);
+        expect(admitted.messages.last.status, MessageStatus.streaming);
+        expect(admitted.messages.first.status, MessageStatus.sending);
         expect(
           visibleText(session.snapshot.messages.last),
           'server did the tools',
@@ -599,8 +708,40 @@ void main() {
       },
     );
 
+    test('a non-null checkpoint is a configuration error', () async {
+      final backend = ManualServerManagedBackend();
+      var checkpoints = 0;
+      Future<void> checkpoint(Conversation snapshot) async {
+        checkpoints++;
+      }
+
+      // The ordinary constructor rejects the pair synchronously…
+      expect(
+        () => makeSession(backend: backend, checkpoint: checkpoint),
+        throwsArgumentError,
+      );
+
+      // …and so does ChatSession.open, which must stop BEFORE its one
+      // attachReply (scripted here, so a reached attach would be visible).
+      backend.onAttach = (_) => backend.open();
+      await expectLater(
+        ChatSession.open(
+          backend: backend,
+          botProfile: plainProfile,
+          history: historyWithRunningReply(),
+          checkpoint: checkpoint,
+        ),
+        throwsArgumentError,
+      );
+
+      expect(checkpoints, 0);
+      expect(backend.attachedReplyIds, isEmpty);
+      expect(backend.admittedReplyIds, isEmpty);
+      expect(backend.sendCalls, 0);
+    });
+
     test(
-      'an unexpected toolCall resolves nothing and starts nothing',
+      'an unexpected toolCall resolves nothing and admits nothing more',
       () async {
         final backend = ManualServerManagedBackend();
         var resolverCalls = 0;
@@ -624,11 +765,169 @@ void main() {
         final state = await waitForState(session, (state) => state is Failed);
 
         // A backend-contract violation ends the observed reply as one upstream
-        // failure: no resolver call, no second startReply.
+        // failure: no resolver call, no second admission.
         expect((state as Failed).cause, FailureCause.upstream);
         expect(resolverCalls, 0);
-        expect(backend.startedReplyIds, hasLength(1));
+        expect(backend.admittedReplyIds, hasLength(1));
         expect(backend.requests, hasLength(1));
+        expect(backend.sendCalls, 0);
+      },
+    );
+
+    test('a confirmed failure before accepted is one local Failed, never a '
+        'second admission', () async {
+      final backend = ManualServerManagedBackend();
+      final session = makeSession(backend: backend);
+      addTearDown(session.dispose);
+      final failures = <ConversationState>[];
+      session.states.where((state) => state is Failed).listen(failures.add);
+
+      await session.send('hi');
+      expect(backend.admittedReplyIds, hasLength(1));
+
+      // A PROVEN admission refusal, with a cause that would be silently
+      // retried in every other mode.
+      backend.emit(const BackendEvent.error(FailureCause.network));
+      final state = await waitForState(session, (state) => state is Failed);
+      await Future<void>.delayed(Duration.zero);
+
+      expect((state as Failed).cause, FailureCause.network);
+      expect(state.phase, FailurePhase.sending);
+      expect(failures, hasLength(1));
+      // No silent retry, no re-admission, no other dispatch.
+      expect(backend.admittedReplyIds, hasLength(1));
+      expect(backend.requests, hasLength(1));
+      expect(backend.sendCalls, 0);
+
+      // A PROVEN refusal means no Job ran, so the turn is undone: the empty
+      // assistant is gone and the anchor user Message is `failed` — the
+      // same-key resend path, unchanged.
+      final afterFailure = session.snapshot.messages;
+      expect(afterFailure, hasLength(1));
+      expect(afterFailure.single.role, MessageRole.user);
+      expect(afterFailure.single.status, MessageStatus.failed);
+      final persistedKey = afterFailure.single.attemptKey;
+      final firstReplyId = backend.admittedReplyIds.single;
+
+      // …and that resend reuses the never-spent persisted key while admitting
+      // a NEW replyId (a replyId is admitted at most once).
+      await session.resend(afterFailure.single.id);
+
+      expect(backend.admittedReplyIds, hasLength(2));
+      expect(backend.requests[1].idempotencyKey, persistedKey);
+      expect(backend.admittedReplyIds[1], isNot(firstReplyId));
+      expect(backend.admittedReplyIds.toSet(), hasLength(2));
+      expect(session.snapshot.messages.last.id, backend.admittedReplyIds[1]);
+      expect(backend.sendCalls, 0);
+    });
+
+    test(
+      'a COMMITTED admission that fails before any delta keeps the user sent '
+      'and regenerates a NEW logical reply',
+      () async {
+        final backend = ManualServerManagedBackend();
+        final session = makeSession(backend: backend);
+        addTearDown(session.dispose);
+
+        await session.send('hi');
+        final firstReplyId = backend.admittedReplyIds.single;
+        final firstKey = backend.requests.single.idempotencyKey;
+
+        // The admission COMMITS (Messages + Job), then the server-owned reply
+        // fails without producing anything visible.
+        backend.emit(const BackendEvent.accepted());
+        backend.emit(const BackendEvent.error(FailureCause.upstream));
+        final failed = await waitForState(session, (state) => state is Failed);
+
+        // The turn provably ran, so it is NOT undone: the user Message keeps
+        // the `sent` it earned at `accepted`, the empty assistant is removed
+        // and the phase is still `sending` (nothing streamed).
+        expect((failed as Failed).phase, FailurePhase.sending);
+        final afterFailure = session.snapshot.messages;
+        expect(afterFailure, hasLength(1));
+        expect(afterFailure.single.role, MessageRole.user);
+        expect(afterFailure.single.status, MessageStatus.sent);
+
+        // Explicit regenerate = exactly ONE more admission, of a NEW logical
+        // reply: fresh attemptKey, fresh replyId, and the old replyId is never
+        // re-admitted (a repeat of it would mean "join the same Job").
+        await session.regenerate();
+
+        expect(backend.admittedReplyIds, hasLength(2));
+        expect(backend.admittedReplyIds[1], isNot(firstReplyId));
+        expect(backend.admittedReplyIds.toSet(), hasLength(2));
+        expect(backend.requests[1].idempotencyKey, isNot(firstKey));
+        final messages = session.snapshot.messages;
+        expect(messages.last.id, backend.admittedReplyIds[1]);
+        expect(messages.first.attemptKey, backend.requests[1].idempotencyKey);
+        expect(messages.last.attemptKey, backend.requests[1].idempotencyKey);
+        expect(backend.sendCalls, 0);
+      },
+    );
+
+    test(
+      'a partial server-managed reply stays interrupted and regenerates a NEW '
+      'logical reply',
+      () async {
+        final backend = ManualServerManagedBackend();
+        var resolverCalls = 0;
+        final session = makeSession(
+          backend: backend,
+          botProfile: serverToolProfile,
+          onToolCall: (call) async {
+            resolverCalls++;
+            return const ToolResult(content: '3 notes', isError: false);
+          },
+        );
+        addTearDown(session.dispose);
+
+        await session.send('hi');
+        final firstReplyId = backend.admittedReplyIds.single;
+        final firstKey = backend.requests.single.idempotencyKey;
+
+        backend.emit(const BackendEvent.accepted());
+        backend.emit(const BackendEvent.delta('partial'));
+        await waitForState(session, (state) => state is Streaming);
+        backend.emit(const BackendEvent.error(FailureCause.upstream));
+        final failed = await waitForState(session, (state) => state is Failed);
+
+        // Past the first delta the partial is kept, exactly as in every other
+        // mode: the assistant becomes `interrupted`, phase `streaming`.
+        expect((failed as Failed).phase, FailurePhase.streaming);
+        final interrupted = session.snapshot.messages.last;
+        expect(interrupted.id, firstReplyId);
+        expect(interrupted.status, MessageStatus.interrupted);
+        expect(visibleText(interrupted), 'partial');
+
+        await session.regenerate();
+
+        // The interrupted reply left the active branch, and the regenerate is
+        // ONE new admission of a NEW logical reply.
+        final messages = session.snapshot.messages;
+        expect(
+          messages.map((message) => message.id),
+          isNot(contains(firstReplyId)),
+        );
+        expect(messages, hasLength(2));
+        expect(messages.first.role, MessageRole.user);
+        expect(messages.last.role, MessageRole.assistant);
+        expect(messages.last.status, MessageStatus.streaming);
+        expect(messages.last.parts, isEmpty);
+
+        // Two admissions, two distinct replyIds, each admitted exactly once…
+        expect(backend.admittedReplyIds, hasLength(2));
+        expect(backend.admittedReplyIds.toSet(), hasLength(2));
+        expect(backend.admittedReplyIds[1], messages.last.id);
+        // …under a new attemptKey carried by both anchors.
+        expect(backend.requests[1].idempotencyKey, isNot(firstKey));
+        expect(messages.first.attemptKey, backend.requests[1].idempotencyKey);
+        expect(messages.last.attemptKey, backend.requests[1].idempotencyKey);
+
+        // Nothing else ran: no send, no startReply (the contract has none) and
+        // no client resolver.
+        expect(backend.sendCalls, 0);
+        expect(resolverCalls, 0);
+        expect(backend, isNot(isA<DurableChatBackend>()));
       },
     );
 
@@ -657,18 +956,38 @@ void main() {
         session.cancel(); // a second cancel is a no-op
         await Future<void>.delayed(Duration.zero);
         expect(session.state, isA<Cancelled>());
-        expect(backend.cancelledReplyIds, [backend.startedReplyIds.single]);
+        expect(backend.cancelledReplyIds, [backend.admittedReplyIds.single]);
 
         await session.dispose();
         expect(backend.cancelledReplyIds, hasLength(1));
       },
     );
 
+    test('cancel between admitReply and accepted still cancels once', () async {
+      final backend = ManualServerManagedBackend();
+      final session = makeSession(backend: backend);
+      addTearDown(session.dispose);
+
+      await session.send('hi');
+      final replyId = backend.admittedReplyIds.single;
+      // The admission has left the client, but nothing came back yet.
+      expect(session.state, isA<Sending>());
+
+      session.cancel();
+      session.cancel(); // a repeated cancel adds nothing
+      await Future<void>.delayed(Duration.zero);
+
+      expect(session.state, isA<Cancelled>());
+      expect(backend.cancelledReplyIds, [replyId]);
+      expect(backend.admittedReplyIds, hasLength(1));
+    });
+
     test(
-      'reopen attaches and the replay replaces the partial as a whole',
+      'a reopened reply only attaches — the replay replaces the partial as a '
+      'whole and dispatches nothing',
       () async {
         final backend = ManualServerManagedBackend();
-        backend.onAttach = (_) => backend._open();
+        backend.onAttach = (_) => backend.open();
         final session = await ChatSession.open(
           backend: backend,
           botProfile: plainProfile,
@@ -687,10 +1006,15 @@ void main() {
         backend.emit(const BackendEvent.done());
         await waitForState(session, (state) => state is Done);
 
-        // A successful attach dispatches nothing: no send (it would throw), no
-        // startReply, no request.
-        expect(backend.startedReplyIds, isEmpty);
+        // The replay continued the EXISTING reply — same Message id, no new
+        // one — and the successful attach dispatched nothing: no admission, no
+        // request, no send (which would have thrown), and attachReply once.
+        expect(session.snapshot.messages.last.id, 'a-1');
+        expect(session.snapshot.messages.last.status, MessageStatus.complete);
+        expect(backend.attachedReplyIds, hasLength(1));
+        expect(backend.admittedReplyIds, isEmpty);
         expect(backend.requests, isEmpty);
+        expect(backend.sendCalls, 0);
       },
     );
   });

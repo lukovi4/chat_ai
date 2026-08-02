@@ -15,9 +15,17 @@ import 'chat_request.dart';
 ///
 /// The three identities are never mixed or reused for one another.
 ///
-/// A `ChatSession` takes the durable path only when its backend implements
+/// A `ChatSession` takes THIS durable path only when its backend implements
 /// this interface; a plain [ChatBackend] keeps the v1 connection-bound
 /// semantics unchanged (cancelling the subscription is a wire-cancel).
+///
+/// This is the **client-owned** durable mode: the Core owns the tool loop and
+/// every billable leg, persists through the app's `checkpoint` and only then
+/// calls [startReply] — a two-step admission — and its recover-before-rebill
+/// rules are unchanged. The server-owned mode is the separate
+/// `ServerManagedDurableChatBackend`, which does NOT implement this interface:
+/// it has no [startReply] and no `checkpoint`, admitting the whole reply in one
+/// atomic `admitReply` instead.
 ///
 /// The package ships no durable backend implementation: the remote generation,
 /// its storage and its host are the Consuming App's.

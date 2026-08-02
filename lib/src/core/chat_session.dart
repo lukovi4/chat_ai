@@ -28,8 +28,15 @@ import 'tool_schema_v1.dart';
 
 /// The app-supplied persistence checkpoint (V1_SPEC §3/§4): awaited after the
 /// relevant Message and `attemptKey` are in the snapshot and before **every
-/// billable provider dispatch**. `null` is valid only when the Consuming App
-/// intentionally has no cross-launch conversation persistence.
+/// billable provider dispatch the Core owns** — `ChatBackend.send` with a plain
+/// backend, `DurableChatBackend.startReply` with the client-owned durable one.
+///
+/// `null` is valid when the Consuming App intentionally has no cross-launch
+/// conversation persistence — and is the ONLY legal value with a
+/// [ServerManagedDurableChatBackend], even for a fully persistent conversation:
+/// there the server persists the snapshot itself, atomically with the Job,
+/// inside the single `admitReply`, so passing a non-null checkpoint alongside
+/// that backend is an [ArgumentError].
 typedef ConversationCheckpoint = Future<void> Function(Conversation snapshot);
 
 /// Logs-only developer details of the pinned internal failures (V1_SPEC §4).
@@ -102,7 +109,10 @@ class ChatSession {
   ///
   /// With a [ServerManagedDurableChatBackend] the tool loop is the server's,
   /// so a Bot Profile with tools needs no [onToolCall]; the declarations
-  /// themselves are validated exactly as always.
+  /// themselves are validated exactly as always. That mode also FORBIDS a
+  /// [checkpoint]: the server persists the snapshot itself, atomically with
+  /// the Job, inside the single `admitReply` — a non-null [checkpoint] there
+  /// is an [ArgumentError] thrown before any backend call.
   ChatSession({
     required ChatBackend backend,
     required BotProfile botProfile,
@@ -153,9 +163,10 @@ class ChatSession {
   /// persisted partial as a whole.
   ///
   /// Every local check of the constructor (numeric configuration, image
-  /// options, Bot Profile/tools/resolver, `history.schemaVersion` and the
-  /// Conversation invariants) runs BEFORE the backend is called: invalid local
-  /// configuration or history never reaches the transport.
+  /// options, Bot Profile/tools/resolver, the server-managed [checkpoint] ban,
+  /// `history.schemaVersion` and the Conversation invariants) runs BEFORE the
+  /// backend is called: invalid local configuration or history never reaches
+  /// the transport — `attachReply` included.
   static Future<ChatSession> open({
     required ChatBackend backend,
     required BotProfile botProfile,
@@ -175,6 +186,7 @@ class ChatSession {
       maxToolTurns: maxToolTurns,
       retryDeadline: retryDeadline,
       imageOptions: imageOptions,
+      checkpoint: checkpoint,
       serverManaged: backend is ServerManagedDurableChatBackend,
     );
     ChatSession build({String? attachedReplyId}) => ChatSession._(
@@ -196,7 +208,15 @@ class ChatSession {
       attachedReplyId: attachedReplyId,
     );
 
-    if (backend is! DurableChatBackend) {
+    // Both durable modes attach the same way — and they are separate types, so
+    // the one `attachReply` of the declared mode is captured here.
+    final Future<Stream<BackendEvent>?> Function(String replyId)? attachReply =
+        switch (backend) {
+          ServerManagedDurableChatBackend() => backend.attachReply,
+          DurableChatBackend() => backend.attachReply,
+          _ => null,
+        };
+    if (attachReply == null) {
       return build();
     }
     final messages = history?.messages ?? const <Message>[];
@@ -208,7 +228,7 @@ class ChatSession {
     }
     // One atomic attempt: no separate liveness probe, so there is no
     // "checked, then attached" race. A throw propagates untouched.
-    final attached = await backend.attachReply(candidate.id);
+    final attached = await attachReply(candidate.id);
     if (attached == null) {
       return build();
     }
@@ -240,7 +260,9 @@ class ChatSession {
     String? attachedReplyId,
   }) : _backend = backend,
        _durableBackend = backend is DurableChatBackend ? backend : null,
-       _serverManaged = backend is ServerManagedDurableChatBackend,
+       _serverManagedBackend = backend is ServerManagedDurableChatBackend
+           ? backend
+           : null,
        _now = now ?? DateTime.now,
        _newUuid = newUuid ?? const Uuid().v4,
        _delayOverride = delay,
@@ -258,6 +280,7 @@ class ChatSession {
         maxToolTurns: _maxToolTurns,
         retryDeadline: _retryDeadline,
         imageOptions: _imageOptions,
+        checkpoint: _checkpoint,
         serverManaged: _serverManaged,
       );
     }
@@ -302,16 +325,27 @@ class ChatSession {
 
   final ChatBackend _backend;
 
-  /// The same backend when it declares the durable capability — the ONLY
-  /// switch between the v1 connection-bound path and the durable
-  /// start/attach/detach/remote-cancel path. `null` for a legacy backend.
+  /// The same backend when it declares the CLIENT-OWNED durable capability —
+  /// the switch between the v1 connection-bound path and the durable
+  /// start/attach/detach/remote-cancel path. `null` for a legacy backend and
+  /// for the server-managed mode, which is a separate contract.
   final DurableChatBackend? _durableBackend;
 
-  /// Whether that durable backend declares the SERVER-MANAGED variant: the
-  /// server owns the whole logical reply, so `startReply` happens exactly once
-  /// and this session runs no tool loop, no silent retry, no fresh-key
-  /// fallback — it only observes, detaches and cancels.
-  final bool _serverManaged;
+  /// The same backend when it declares the SERVER-MANAGED durable contract:
+  /// the server owns the whole logical reply, so this session admits it ONCE
+  /// (`admitReply`, which persists the snapshot and creates the Job in one
+  /// server transaction) and then runs no checkpoint, no tool loop, no silent
+  /// retry and no fresh-key fallback — it only observes, detaches and cancels.
+  final ServerManagedDurableChatBackend? _serverManagedBackend;
+
+  /// Whether the session is in the server-managed mode.
+  bool get _serverManaged => _serverManagedBackend != null;
+
+  /// Whether the backend declares EITHER durable mode: the reply then owns a
+  /// stable `replyId` (its empty assistant Message) minted before the first
+  /// dispatch, plus the attach/detach/remote-cancel lifecycle.
+  bool get _durableLifecycle =>
+      _durableBackend != null || _serverManagedBackend != null;
 
   final OnToolCall? _onToolCall;
   final int? _trimBudget;
@@ -439,6 +473,13 @@ class ChatSession {
   /// first recovers under the persisted key (fresh key only as the one
   /// explicit `409`/`410` fallback); a `complete` reply starts a fresh
   /// billable Attempt immediately.
+  ///
+  /// With a [ServerManagedDurableChatBackend] EVERY regenerate is that fresh
+  /// Attempt: a `replyId` is admitted at most once and a repeated `admitReply`
+  /// of it means "transport duplicate — join the existing Job", so an explicit
+  /// regenerate must not reuse it. The previous reply is dropped from the
+  /// active branch and one new logical reply is admitted, with a new
+  /// `attemptKey` and a new `replyId`.
   Future<void> regenerate() async {
     await _regenerate();
   }
@@ -494,24 +535,28 @@ class ChatSession {
   }
 
   /// Fires the durable remote cancel at most once per LOGICAL REPLY, and only
-  /// when this reply actually reached the backend (a `startReply` happened or
-  /// an `attachReply` succeeded). Uses the retained `replyId`, so a removed
-  /// technical assistant Message does not lose the remote reply. The flag lives
-  /// on the reply, so cancelling one reply never mutes the cancel of the next
-  /// one in the same session. The Future is tracked by the teardown chain
-  /// (errors swallowed there) — a failing remote cancel never changes the local
-  /// terminal and never goes unhandled.
+  /// when this reply actually reached the backend (a `startReply`/`admitReply`
+  /// happened or an `attachReply` succeeded). In the server-managed mode
+  /// "reached the backend" is the `admitReply` CALL, not its `accepted`: a
+  /// cancel racing an unfinished admission still fires, and the app's
+  /// idempotent, race-safe `cancelReply` resolves it by `replyId`. Uses the
+  /// retained `replyId`, so a removed technical assistant Message does not lose
+  /// the remote reply. The flag lives on the reply, so cancelling one reply
+  /// never mutes the cancel of the next one in the same session. The Future is
+  /// tracked by the teardown chain (errors swallowed there) — a failing remote
+  /// cancel never changes the local terminal and never goes unhandled.
   void _requestRemoteCancel(_Reply reply) {
-    final durable = _durableBackend;
+    final cancelReply =
+        _serverManagedBackend?.cancelReply ?? _durableBackend?.cancelReply;
     final replyId = reply.durableReplyId;
-    if (durable == null ||
+    if (cancelReply == null ||
         replyId == null ||
         !reply.remoteStarted ||
         reply.remoteCancelSent) {
       return;
     }
     reply.remoteCancelSent = true;
-    _trackWireCancel(durable.cancelReply(replyId));
+    _trackWireCancel(cancelReply(replyId));
   }
 
   /// Frees the session. The returned Future completes only when the
@@ -694,9 +739,11 @@ class ChatSession {
     final last = _messages.last;
 
     if (last.role == MessageRole.assistant &&
-        last.status == MessageStatus.interrupted) {
+        last.status == MessageStatus.interrupted &&
+        !_serverManaged) {
       // Recover-before-rebill: repeat the interrupted leg under its
       // persisted key; only an explicit 409/410 falls back to a fresh key.
+      // A server-managed reply is deliberately excluded — see below.
       _busy = true;
       _updateMessage(
         last.id,
@@ -722,11 +769,21 @@ class ChatSession {
     }
 
     if (last.role == MessageRole.assistant &&
-        last.status == MessageStatus.complete) {
+        (last.status == MessageStatus.complete ||
+            (_serverManaged && last.status == MessageStatus.interrupted))) {
       // A complete reply regenerates as a new billable Attempt immediately:
       // truncate the reply away and re-run from its user Message under a
       // fresh key (truncate-and-resend, no confirmation — CONTEXT
       // §Regenerate/Edit).
+      //
+      // A server-managed INTERRUPTED reply takes exactly this path too: its
+      // `replyId` is admitted at most once, and a repeated `admitReply` of the
+      // same id is by contract a transport duplicate that JOINS the existing
+      // Job — which would silently re-observe the dead reply instead of
+      // running a new one. An explicit regenerate must be distinguishable from
+      // that duplicate, so it starts a NEW logical reply: the old assistant is
+      // dropped from the active branch and the next admission mints a fresh
+      // `attemptKey` and a fresh `replyId`.
       final anchorIndex = _messages.lastIndexWhere(
         (message) => message.role == MessageRole.user,
         _messages.length - 2,
@@ -760,10 +817,23 @@ class ChatSession {
     if (last.role == MessageRole.user && last.status == MessageStatus.sent) {
       // The final `sent` user Message with no assistant after it: pre-token
       // recovery under that Message's persisted key.
+      //
+      // Server-managed is the one exception, for the same reason as above.
+      // This state is left behind by more than one route: a COMMITTED
+      // admission that failed before its first delta, and an explicit cancel
+      // before or after `accepted` — in every case the old `replyId` is spent,
+      // and re-running the same key would be indistinguishable from a
+      // transport duplicate. Whatever ended the previous reply, the explicit
+      // regenerate that follows is a NEW user-initiated logical reply: it
+      // mints a fresh `attemptKey` here, and the admission after it mints a
+      // fresh `replyId`.
       _busy = true;
       _updateMessage(
         last.id,
-        (message) => message.copyWith(status: MessageStatus.sending),
+        (message) => message.copyWith(
+          status: MessageStatus.sending,
+          attemptKey: _serverManaged ? _newUuid() : message.attemptKey,
+        ),
       );
       return _beginAttempt(
         _Reply(
@@ -771,7 +841,7 @@ class ChatSession {
           profile: _botProfile,
           startedAt: _now(),
           anchorUserId: last.id,
-          freshKeyFallbackArmed: true,
+          freshKeyFallbackArmed: !_serverManaged,
         ),
       );
     }
@@ -878,6 +948,12 @@ class ChatSession {
   /// `Sending`, assemble/trim, await the checkpoint, dispatch the frozen
   /// request, and drive the reply in the background. The command Future ends
   /// at the dispatch decision.
+  ///
+  /// The server-managed mode runs the SAME preparation and then dispatches the
+  /// single `admitReply` instead: the anchor Message and its `attemptKey`, the
+  /// frozen request, the empty `streaming` assistant (`replyId`) and the frozen
+  /// snapshot of all of it — with no Dart checkpoint, which that mode forbids,
+  /// because the admission persists the snapshot itself.
   Future<ChatCommandDisposition> _beginAttempt(_Reply reply) async {
     _reply = reply;
     _resetTokenStream();
@@ -900,6 +976,7 @@ class ChatSession {
       idempotencyKey: _anchorKey(reply),
     );
     _createEarlyDurableAssistant(reply);
+    _freezeAdmissionSnapshot(reply);
     if (!await _checkpointBeforeDispatch(reply)) {
       return ChatCommandDisposition.rejected;
     }
@@ -907,19 +984,21 @@ class ChatSession {
     return ChatCommandDisposition.accepted;
   }
 
-  /// The durable reply identity (`replyId`): the assistant Message is created
-  /// EMPTY and `streaming` right after the request is frozen and BEFORE the
-  /// checkpoint that precedes the first billable dispatch, so the app owns a
-  /// stable id (and this leg's `attemptKey`) in its own storage before any
-  /// provider work. Legacy backends keep creating the assistant at the first
-  /// content event.
+  /// The durable reply identity (`replyId`), shared by BOTH durable modes: the
+  /// assistant Message is created EMPTY and `streaming` right after the request
+  /// is frozen and BEFORE the persistence that precedes the first billable
+  /// dispatch — the app's `checkpoint` with a client-owned
+  /// [DurableChatBackend], the snapshot of the single `admitReply` with a
+  /// [ServerManagedDurableChatBackend] — so the app owns a stable id (and this
+  /// leg's `attemptKey`) in its own storage before any provider work. Legacy
+  /// backends keep creating the assistant at the first content event.
   ///
   /// The frozen request was built above, from the anchor Message's key and
   /// without this assistant; with `legBaselineParts == 0` the reply's own
   /// assistant is excluded from `_dispatchHistory`, so the provider-effective
   /// first leg stays byte-identical to v1.
   void _createEarlyDurableAssistant(_Reply reply) {
-    if (_durableBackend == null || reply.assistantId != null) {
+    if (!_durableLifecycle || reply.assistantId != null) {
       return;
     }
     final message = Message(
@@ -935,6 +1014,23 @@ class ChatSession {
     reply.durableReplyId = message.id;
     reply.legBaselineParts = 0;
     reply.earlyAssistant = true;
+  }
+
+  /// Freezes the exact `Conversation` value the single server-managed
+  /// `admitReply` persists (V1_SPEC §8, server-managed variant).
+  ///
+  /// It is taken right after the empty `streaming` assistant — the `replyId` —
+  /// joined the snapshot and BEFORE any event of this reply is applied, so the
+  /// admitted value holds exactly the user Message of this turn and that empty
+  /// assistant, and never follows the session's later local delta/status
+  /// updates: [snapshot] copies the list and every `Message` is immutable, so
+  /// the captured value is stable by construction. Only this mode needs it —
+  /// the other two paths persist through the app's `checkpoint`.
+  void _freezeAdmissionSnapshot(_Reply reply) {
+    if (!_serverManaged) {
+      return;
+    }
+    reply.admissionSnapshot = snapshot;
   }
 
   /// Resumes the reply `open()` attached to: no assembly, no checkpoint, no
@@ -1125,6 +1221,12 @@ class ChatSession {
         }
         switch (events.current) {
           case Accepted():
+            if (_serverManaged) {
+              // The admission receipt: Messages + Job are committed, so this
+              // reply's turn provably ran. A later failure of it is no longer
+              // a refusal — see `_Reply.admissionCommitted`.
+              reply.admissionCommitted = true;
+            }
             _markAnchorUserSent(reply);
           case Delta(:final text):
             _applyLegResetIfNeeded(reply);
@@ -1228,12 +1330,30 @@ class ChatSession {
   };
 
   /// The event source of one request: the attached stream `open()` already
-  /// obtained (consumed once, no backend call), the durable `startReply` of
-  /// this reply, or the legacy `send`.
+  /// obtained (consumed once, no backend call), the ONE server-managed
+  /// `admitReply` of this logical reply, the client-owned durable `startReply`
+  /// of this leg, or the legacy `send`.
+  ///
+  /// `admitReply` is reached exactly once per server-managed reply: this mode
+  /// has no silent retry, no fresh-key fallback and no tool leg, so nothing
+  /// re-enters the dispatch for the same reply.
   Stream<BackendEvent> _dispatchStream(_Reply reply) {
     final attached = reply.takeAttachedStream();
     if (attached != null) {
       return attached;
+    }
+    final serverManaged = _serverManagedBackend;
+    if (serverManaged != null) {
+      final replyId = reply.assistantId!;
+      reply.durableReplyId = replyId;
+      // The admission has left the client: an explicit cancel from here on
+      // fires `cancelReply`, `accepted` or not.
+      reply.remoteStarted = true;
+      return serverManaged.admitReply(
+        replyId,
+        reply.request!,
+        reply.admissionSnapshot!,
+      );
     }
     final durable = _durableBackend;
     if (durable == null) {
@@ -1413,6 +1533,13 @@ class ChatSession {
   /// output — is removed instead of being left behind as an interrupted
   /// reply the user never saw; a recovery's pre-existing partial is always
   /// kept.
+  ///
+  /// One split is server-managed only (V1_SPEC §8): a pre-token failure whose
+  /// admission had ALREADY committed (`accepted` arrived) is not a refusal of
+  /// the turn — the Job existed and the server ran it — so the anchor user
+  /// Message keeps the `sent` it earned at `accepted` and the recovery is
+  /// `regenerate`, which starts a NEW logical reply. Only a PROVEN pre-
+  /// `accepted` refusal still fails the user Message for a same-key `resend`.
   void _failOperational(_Reply reply, FailureCause cause, {String? detail}) {
     if (reply.assistantId != null && !_removeTechnicalAssistant(reply)) {
       _interruptAssistant(reply);
@@ -1422,6 +1549,21 @@ class ChatSession {
         ConversationState.failed(
           cause,
           FailurePhase.streaming,
+          developerDetail: detail,
+        ),
+        recovery: ChatErrorRecovery.regenerate,
+      );
+      return;
+    }
+    if (reply.admissionCommitted) {
+      // Committed admission, no visible output: the empty technical assistant
+      // was just removed, the user Message stays `sent`, and the phase is
+      // still `sending` (nothing was streamed). Regenerating admits a fresh
+      // logical reply — the committed `replyId` is never admitted twice.
+      _terminal(
+        ConversationState.failed(
+          cause,
+          FailurePhase.sending,
           developerDetail: detail,
         ),
         recovery: ChatErrorRecovery.regenerate,
@@ -1966,8 +2108,24 @@ void _preflightSessionConfig({
   required int maxToolTurns,
   required Duration retryDeadline,
   required ImageSendOptions imageOptions,
+  required ConversationCheckpoint? checkpoint,
   required bool serverManaged,
 }) {
+  if (serverManaged && checkpoint != null) {
+    // The contradiction is the whole point of the server-managed mode: its
+    // `admitReply` persists the snapshot and creates the Job in ONE server
+    // transaction, so a separate Dart checkpoint would reintroduce exactly the
+    // two-step crash-gap (Messages saved, Job missing) it removes. Checked
+    // first and synchronously — before `attachReply`, `admitReply`, `send`,
+    // the checkpoint itself or any other backend call.
+    throw ArgumentError.value(
+      checkpoint,
+      'checkpoint',
+      'a ServerManagedDurableChatBackend persists the Conversation itself, '
+          'atomically with its Job, inside admitReply — this mode forbids a '
+          'separate checkpoint',
+    );
+  }
   _checkPositiveConfig(maxToolTurns, 'maxToolTurns');
   if (retryDeadline <= Duration.zero) {
     throw ArgumentError.value(
@@ -2141,6 +2299,23 @@ class _Reply {
   bool freshKeyFallbackArmed;
 
   ChatRequest? request;
+
+  /// The frozen `Conversation` handed to the ONE server-managed `admitReply`
+  /// (the value the server persists atomically with the Job). Captured before
+  /// any event of this reply is applied; `null` in every other mode and on the
+  /// attach path, which admits nothing.
+  Conversation? admissionSnapshot;
+
+  /// Whether the server-managed admission of this reply is COMMITTED: set at
+  /// the `accepted` of `admitReply`, which is the receipt of the Messages + Job
+  /// transaction. It splits the two pre-token failures that look alike on the
+  /// wire — a proven refusal BEFORE it (no Job, the turn never ran: the anchor
+  /// user Message becomes `failed` and `resend` is the recovery) and a failure
+  /// AFTER it (the Job existed: the user Message stays `sent` and only
+  /// `regenerate` — a NEW logical reply — can recover it). Always `false` in
+  /// the other two modes, which have no admission.
+  bool admissionCommitted = false;
+
   bool tokenSeenThisLeg = false;
 
   /// The durable reply identity (the assistant `Message.id`), retained even
