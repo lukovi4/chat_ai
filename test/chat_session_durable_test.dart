@@ -662,19 +662,35 @@ void main() {
         final request = backend.requests.single;
         final admitted = backend.snapshots.single;
 
-        // The admitted snapshot is exactly what the Core held at that moment:
+        // The admitted snapshot is the COMMITTED, persistence-ready value:
         // this turn's user Message plus the EMPTY `streaming` assistant whose
         // id IS the replyId.
         expect(admitted.messages, hasLength(2));
         final user = admitted.messages.first;
         final assistant = admitted.messages.last;
         expect(user.role, MessageRole.user);
-        expect(user.status, MessageStatus.sending);
         expect(assistant.role, MessageRole.assistant);
         expect(assistant.id, replyId);
         expect(assistant.status, MessageStatus.streaming);
         expect(assistant.parts, isEmpty);
         expect(session.snapshot.messages.last.id, replyId);
+
+        // The ONE intentional difference from the local snapshot: the anchor
+        // user Message is already `sent` in the value the server persists —
+        // the status it holds once the admission is committed — while locally
+        // it is still `sending`, because `accepted` has not arrived yet.
+        final localUser = session.snapshot.messages.first;
+        expect(localUser.status, MessageStatus.sending);
+        expect(user.status, MessageStatus.sent);
+        // …and it IS the same Message, field for field.
+        expect(user.id, localUser.id);
+        expect(visibleText(user), 'hi');
+        expect(visibleText(user), visibleText(localUser));
+        expect(user.parts, localUser.parts);
+        expect(user.attemptKey, localUser.attemptKey);
+        expect(user.role, localUser.role);
+        expect(user.createdAt, localUser.createdAt);
+        expect(admitted.schemaVersion, session.snapshot.schemaVersion);
 
         // ONE first-leg attemptKey: the frozen request and both anchors of the
         // admitted snapshot carry the same key…
@@ -700,13 +716,66 @@ void main() {
         expect(backend.admittedReplyIds, hasLength(1));
         expect(admitted.messages.last.parts, isEmpty);
         expect(admitted.messages.last.status, MessageStatus.streaming);
-        expect(admitted.messages.first.status, MessageStatus.sending);
+        expect(admitted.messages.first.status, MessageStatus.sent);
+        expect(admitted.messages.first.id, localUser.id);
+        // The local user Message reached `sent` only through `accepted`.
+        expect(session.snapshot.messages.first.status, MessageStatus.sent);
         expect(
           visibleText(session.snapshot.messages.last),
           'server did the tools',
         );
       },
     );
+
+    test(
+      'an immediate cancel before the admission dispatches nothing',
+      () async {
+        final backend = ManualServerManagedBackend();
+        final session = makeSession(backend: backend);
+        addTearDown(session.dispose);
+
+        // The race the fence guards: `send` is NOT awaited, so the cancel lands
+        // between the command's synchronous prefix and the resumption that
+        // would dispatch the admission.
+        final sendFuture = session.send('hi');
+        session.cancel();
+        session.cancel(); // a repeated cancel adds nothing
+        await sendFuture;
+        await Future<void>.delayed(Duration.zero);
+
+        expect(session.state, isA<Cancelled>());
+        // The admission never left the client: no Job of this reply exists…
+        expect(backend.admittedReplyIds, isEmpty);
+        expect(backend.requests, isEmpty);
+        expect(backend.snapshots, isEmpty);
+        expect(backend.sendCalls, 0);
+        // …so there is nothing to cancel remotely either.
+        expect(backend.cancelledReplyIds, isEmpty);
+        expect(backend.cancelledSubscriptions, 0);
+      },
+    );
+
+    test('an immediate dispose before the admission creates no Job', () async {
+      final backend = ManualServerManagedBackend();
+      final session = makeSession(backend: backend);
+
+      // Same race, resolved by dispose: the reply is invalidated before the
+      // resumption that would admit it.
+      final sendFuture = session.send('hi');
+      final disposeFuture = session.dispose();
+      await Future.wait([sendFuture, disposeFuture]);
+      await Future<void>.delayed(Duration.zero);
+
+      // A disposed session admits nothing: no server-side Job is created after
+      // the session was closed…
+      expect(backend.admittedReplyIds, isEmpty);
+      expect(backend.requests, isEmpty);
+      expect(backend.snapshots, isEmpty);
+      expect(backend.sendCalls, 0);
+      // …and dispose never remote-cancels.
+      expect(backend.cancelledReplyIds, isEmpty);
+      expect(backend.cancelledSubscriptions, 0);
+    });
 
     test('a non-null checkpoint is a configuration error', () async {
       final backend = ManualServerManagedBackend();
@@ -785,6 +854,14 @@ void main() {
       await session.send('hi');
       expect(backend.admittedReplyIds, hasLength(1));
 
+      // The committed snapshot handed over carries the anchor user as `sent`,
+      // while locally that Message is still only `sending`.
+      final admittedUser = backend.snapshots.single.messages.first;
+      expect(admittedUser.role, MessageRole.user);
+      expect(admittedUser.status, MessageStatus.sent);
+      expect(session.snapshot.messages.first.id, admittedUser.id);
+      expect(session.snapshot.messages.first.status, MessageStatus.sending);
+
       // A PROVEN admission refusal, with a cause that would be silently
       // retried in every other mode.
       backend.emit(const BackendEvent.error(FailureCause.network));
@@ -805,7 +882,12 @@ void main() {
       final afterFailure = session.snapshot.messages;
       expect(afterFailure, hasLength(1));
       expect(afterFailure.single.role, MessageRole.user);
+      // Forming the committed snapshot never promoted the LOCAL Message: only
+      // `accepted` does that, and it never arrived.
       expect(afterFailure.single.status, MessageStatus.failed);
+      expect(afterFailure.single.id, admittedUser.id);
+      // The frozen admission value is untouched by that local failure.
+      expect(admittedUser.status, MessageStatus.sent);
       final persistedKey = afterFailure.single.attemptKey;
       final firstReplyId = backend.admittedReplyIds.single;
 

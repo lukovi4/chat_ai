@@ -549,9 +549,14 @@ await store.finishReply(replyId, result.termination, result.parts, result.usage)
   server-managed режим (server-owned tool loop, ключ первого leg — тот же
   `firstAttemptKey`); в этом режиме он приходит как
   `ChatRequest.idempotencyKey` и фиксируется самой atomic admission
-  (`admitReply` сохраняет snapshot вместе с Job в одной транзакции), а **не**
-  отдельным клиентским Dart-checkpoint'ом — его в этом режиме нет. Но эта
-  связка — композиция приложения, а не контракт пакета.
+  (`admitReply` сохраняет переданный committed snapshot вместе с Job в одной
+  транзакции — anchor user Message в нём уже `sent`, сохранять его нужно как
+  есть, без собственного `sending → sent`; клиентская сессия держит тот же
+  Message как `sending` до `accepted`), а **не** отдельным клиентским
+  Dart-checkpoint'ом — его в этом режиме нет. Если клиент отменяет или
+  закрывает сессию до фактического вызова `admitReply`, admission не
+  происходит и Job не создаётся. Но эта связка — композиция приложения, а не
+  контракт пакета.
 
 ## Деплой под новое приложение
 

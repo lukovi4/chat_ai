@@ -977,7 +977,14 @@ class ChatSession {
     );
     _createEarlyDurableAssistant(reply);
     _freezeAdmissionSnapshot(reply);
-    if (!await _checkpointBeforeDispatch(reply)) {
+    final checkpointPassed = await _checkpointBeforeDispatch(reply);
+    // The post-await fence: `_checkpointBeforeDispatch` is asynchronous even
+    // with no checkpoint at all, so a `cancel()`/`dispose()` fired between the
+    // command's synchronous prefix and this resumption has already invalidated
+    // the reply. Re-check here — never on the stale result alone — so a
+    // cancelled reply cannot dereference its removed assistant and a disposed
+    // session cannot still admit a server-side Job.
+    if (!checkpointPassed || _epoch != reply.epoch || _disposed) {
       return ChatCommandDisposition.rejected;
     }
     unawaited(_driveReply(reply));
@@ -1026,11 +1033,31 @@ class ChatSession {
   /// updates: [snapshot] copies the list and every `Message` is immutable, so
   /// the captured value is stable by construction. Only this mode needs it —
   /// the other two paths persist through the app's `checkpoint`.
+  ///
+  /// The admitted value is COMMITTED/persistence-ready, and that is its one
+  /// intentional difference from the local snapshot: the anchor user Message of
+  /// THIS reply carries `sent` there, because the server saves it inside the
+  /// same transaction that creates the Job — a snapshot persisted as `sending`
+  /// would restore a false unfinished user Message after a restart. Locally the
+  /// same Message stays `sending` until `accepted` arrives (and becomes
+  /// `failed` by the existing path if the admission is refused before that);
+  /// every other field of it and every other Message are copied unchanged.
   void _freezeAdmissionSnapshot(_Reply reply) {
     if (!_serverManaged) {
       return;
     }
-    reply.admissionSnapshot = snapshot;
+    final local = snapshot;
+    final anchorId = reply.anchorUserId;
+    reply.admissionSnapshot = Conversation(
+      schemaVersion: local.schemaVersion,
+      messages: [
+        for (final message in local.messages)
+          if (message.id == anchorId)
+            message.copyWith(status: MessageStatus.sent)
+          else
+            message,
+      ],
+    );
   }
 
   /// Resumes the reply `open()` attached to: no assembly, no checkpoint, no

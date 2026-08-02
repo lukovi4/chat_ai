@@ -705,10 +705,15 @@ contracts, and a backend declares one of them:
   `accepted`/`delta`/`done`/`error` and never resolves a tool call itself. Here
   admission is **one call**: `admitReply(replyId, request, snapshot)` hands the
   server the exact Conversation to save together with the Job, in one
-  transaction, so a crash can never leave "Messages saved, no Job". Its
-  `accepted` IS that commit's receipt, and a separate Dart `checkpoint` is
-  forbidden in this mode (`ArgumentError`) precisely because it would put the
-  two-step gap back.
+  transaction, so a crash can never leave "Messages saved, no Job". That
+  snapshot is the **committed** value — the turn's user Message is already
+  `sent` in it, so a restart from the server's copy never shows a false
+  unfinished send, while locally that Message stays `sending` until `accepted`
+  arrives. Its `accepted` IS that commit's receipt, and a separate Dart
+  `checkpoint` is forbidden in this mode (`ArgumentError`) precisely because it
+  would put the two-step gap back. A cancel or dispose that lands before the
+  admission is actually dispatched stops it outright: no `admitReply`, hence no
+  Job.
 
 **None of this means the kit ships a running backend.** Both durable
 capabilities are *contracts*: the atomic admission, the Job, the long-running

@@ -49,14 +49,23 @@ abstract interface class ServerManagedDurableChatBackend
   /// - [request] — the frozen first-leg request; its `idempotencyKey` is the
   ///   `attemptKey` of the FIRST provider leg. Every following leg — its key,
   ///   its dispatch and the tools between them — belongs to the server;
-  /// - [snapshot] — the exact frozen `Conversation` the Core holds at this
-  ///   moment: it contains the user `Message` of this turn and the empty
+  /// - [snapshot] — the COMMITTED, persistence-ready `Conversation` of this
+  ///   admission: it contains the user `Message` of this turn and the empty
   ///   `streaming` assistant `Message` whose `id` is [replyId]. It is a value
-  ///   taken before any event of this reply is applied and never follows the
+  ///   frozen before any event of this reply is applied and never follows the
   ///   session's later local updates.
   ///
+  /// [snapshot] matches the Core's local snapshot at the admission boundary
+  /// with exactly ONE intentional difference: the anchor user `Message` of this
+  /// reply already carries `sent` there — the status it will hold once this
+  /// admission is committed — so a restart from the persisted value never
+  /// restores a false unfinished user `Message`. Locally that same `Message`
+  /// stays `sending` until `accepted` arrives. The backend MUST persist the
+  /// value exactly as handed over: no implicit `sending → sent` conversion of
+  /// its own, and no other rewriting of the Messages.
+  ///
   /// The app's backend MUST, in ONE server transaction:
-  /// - persist that [snapshot];
+  /// - persist that [snapshot] verbatim;
   /// - create — or safely join — the single Job of this [replyId].
   ///
   /// No provider call may start before that transaction has committed. There
@@ -64,6 +73,11 @@ abstract interface class ServerManagedDurableChatBackend
   /// `ChatSession` is a configuration error (`ArgumentError`), because the
   /// two-step "persist, then start" is exactly the crash-gap this call
   /// removes.
+  ///
+  /// A `cancel()` or `dispose()` that wins the race BEFORE this call is
+  /// actually made means no admission happens at all: the Core does not reach
+  /// [admitReply], so no Job of that reply is ever created and there is nothing
+  /// to cancel remotely.
   ///
   /// The stream carries exactly four event kinds: `accepted`, `delta`, `done`
   /// and `error`. Server-owned `tool_call`s, their results and the provider

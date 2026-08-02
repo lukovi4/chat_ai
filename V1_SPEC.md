@@ -1017,7 +1017,10 @@ abstract interface class ServerManagedDurableChatBackend
   Stream<BackendEvent> admitReply(
     String replyId,                   // id of the empty `streaming` assistant
     ChatRequest request,              // the frozen FIRST-leg request
-    Conversation snapshot,            // the exact frozen Conversation to persist
+    Conversation snapshot,            // the COMMITTED Conversation to persist
+                                      //   verbatim: identical to the Core's
+                                      //   local value except that this reply's
+                                      //   anchor user Message is already `sent`
   );
     // ONE atomic server operation for the WHOLE logical reply: persist that
     // snapshot AND create (or safely join) the single Job of `replyId`, in one
@@ -1064,6 +1067,19 @@ What the Core does differently in this mode, and nothing else:
   silent retry, no fresh-key fallback, no `send`, no `startReply` and no second
   admission; `rate`/`overloaded`/`network`/`error` are the **terminal result of
   the observed server reply**;
+- that snapshot is the **committed, persistence-ready** value, and that is its
+  ONE intentional difference from the local one: this reply's anchor user
+  Message already carries `sent` there — the status it holds once the admission
+  commits — so a restart from the persisted value never restores a false
+  unfinished user Message. Every other field of it and every other Message are
+  copied unchanged; the backend persists it **verbatim**, with no implicit
+  `sending → sent` of its own. **Locally** that same Message stays `sending`
+  until `accepted` arrives, and a proven pre-`accepted` refusal still fails it
+  by the unchanged path;
+- a `cancel()`/`dispose()` that wins the race **before the admission is
+  actually dispatched** stops it: the Core re-checks the reply after the
+  pre-dispatch await, so `admitReply` is never called and no Job of that reply
+  is created (nor is there anything to cancel remotely);
 - `accepted` splits the two pre-token failures that look alike on the wire:
   - **before it** — a PROVEN refusal, no Job: the empty assistant is removed,
     the anchor user Message becomes `failed`, the recovery is `resend` (its
@@ -1190,7 +1206,10 @@ and run in that package; the numbering is kept for continuity:
    does not repeat it. With a `ServerManagedDurableChatBackend` there is no
    checkpoint to await: the pair throws `ArgumentError` (constructor and
    `ChatSession.open`, before any backend call), and the single `admitReply`
-   carries the frozen snapshot the server persists atomically with the Job.
+   carries the frozen committed snapshot the server persists atomically with
+   the Job — its anchor user Message already `sent`, while the local one stays
+   `sending` until `accepted`. A cancel/dispose before that dispatch admits
+   nothing at all.
 8. **Tool cycle and safety**: fresh key per leg; leg usage sums; `tool_call` is
    terminal without `done`; resolver exceptions are sanitised `is_error`;
    unknown tool/schema-invalid args never invoke resolver; existing result
