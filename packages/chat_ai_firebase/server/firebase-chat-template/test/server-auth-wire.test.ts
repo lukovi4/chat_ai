@@ -146,6 +146,10 @@ describe('handler — payload / wire', () => {
     ['bad part discriminator', validBody({ messages: [{ id: 'm', role: 'user', status: 'sent', createdAt: 't', parts: [{ type: 'video', url: 'x' }] }] })],
     ['image wrong mime', validBody({ messages: [{ id: 'm', role: 'user', status: 'sent', createdAt: 't', parts: [{ type: 'image', mimeType: 'image/png', data: 'AA' }] }] })],
     ['toolResult non-boolean isError', validBody({ messages: [{ id: 'm', role: 'assistant', status: 'complete', createdAt: 't', parts: [{ type: 'toolResult', toolCallId: 'c', content: 'x', isError: 'no' }] }] })],
+    // A user Message with no content part is legal in the client's stored
+    // Conversation but carries nothing for the provider — the Core never
+    // assembles it, so on the wire it is invalid (rejected before the claim).
+    ['user with no content parts', validBody({ messages: [{ id: 'm', role: 'user', status: 'sent', createdAt: 't', parts: [] }] })],
   ])('rejects an invalid message/content-part (%s)', async (_label, body) => {
     const h = harness();
     const res = await h.run(makeReq({ body }));

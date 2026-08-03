@@ -3,6 +3,10 @@
 ///
 /// Assembly filters the snapshot for the wire:
 /// - `failed` user Messages are excluded (they never reached the bot);
+/// - user Messages with no parts are excluded — an empty user Message is a
+///   legal storage/UI-only entry of the Conversation with no
+///   provider-effective content, so it stays in the snapshot but never
+///   rides the wire (a provider request can carry no empty user content);
 /// - `interrupted` assistant partials are included;
 /// - empty `complete` assistant Messages (no parts) are dropped from the
 ///   wire but stay in storage/UI;
@@ -94,7 +98,7 @@ AssembledContext assembleContext({
 
 bool _ridesOnWire(Message message) {
   if (message.role == MessageRole.user &&
-      message.status == MessageStatus.failed) {
+      (message.status == MessageStatus.failed || message.parts.isEmpty)) {
     return false;
   }
   if (message.role == MessageRole.assistant &&

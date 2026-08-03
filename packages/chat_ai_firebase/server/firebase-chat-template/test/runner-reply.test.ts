@@ -340,6 +340,49 @@ describe('billable leg boundary', () => {
 });
 
 describe('event delivery and provider translation', () => {
+  it('a user Message with no content part fails translation before any provider call', async () => {
+    const client = new FakeClient([textLeg('never dispatched')]);
+    let legStarts = 0;
+    const events: ChatReplyEventDelivery[] = [];
+    let toolCalls = 0;
+    const result = await run(client, {
+      request: request({
+        messages: [
+          {
+            id: 'u-1',
+            role: 'user',
+            parts: [],
+            status: 'sent',
+            attemptKey: key('u'),
+            createdAt: '2026-07-10T09:00:00.000Z',
+          },
+        ],
+      }),
+      onLegStart: () => {
+        legStarts += 1;
+        return { attemptKey: key('1') };
+      },
+      onEvent: (delivery) => void events.push(delivery),
+      onToolCall: () => {
+        toolCalls += 1;
+        return { content: 'never' };
+      },
+    });
+
+    expect(client.requests).toHaveLength(0);
+    expect(result.termination).toMatchObject({
+      kind: 'local-error',
+      stage: 'request-translation',
+      legIndex: 0,
+      disposition: 'not-dispatched',
+    });
+    expect(result.legs).toHaveLength(0);
+    expect(result.usage).toEqual({ inputTokens: 0, outputTokens: 0, exact: true });
+    expect(legStarts).toBe(0);
+    expect(events).toEqual([]);
+    expect(toolCalls).toBe(0);
+  });
+
   it('every delivery carries replyId, legIndex and attemptKey', async () => {
     const client = new FakeClient([textLeg('hello')]);
     const deliveries: ChatReplyEventDelivery[] = [];

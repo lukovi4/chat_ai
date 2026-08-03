@@ -448,6 +448,109 @@ void main() {
     );
   });
 
+  group('an empty user Message is never a provider anchor', () {
+    // A user Message with no parts is a legal storage/UI-only entry that
+    // never rides the wire, so every recovery command that would answer it
+    // is a FULL no-op: nothing mutates, no key is minted, no checkpoint runs
+    // and the backend is never called.
+    Future<void> expectFullNoOp(
+      Conversation history,
+      Future<void> Function(ChatSession session) command,
+    ) async {
+      final fake = FakeChatBackend()..reply('never dispatched');
+      final uuid = SequentialUuid();
+      final checkpoints = <Conversation>[];
+      final session = makeSession(
+        backend: fake,
+        time: FakeTime(),
+        uuid: uuid,
+        checkpoint: (snapshot) async => checkpoints.add(snapshot),
+        history: history,
+      );
+      final before = session.snapshot.toJson();
+      final stateBefore = session.state;
+
+      await command(session);
+      await Future<void>.delayed(Duration.zero);
+
+      expect(capturedRequestsOf(fake), isEmpty, reason: 'no dispatch');
+      expect(checkpoints, isEmpty, reason: 'no checkpoint');
+      expect(uuid.minted, isEmpty, reason: 'no key or id minted');
+      expect(session.snapshot.toJson(), before, reason: 'Conversation intact');
+      expect(session.state, stateBefore, reason: 'state intact');
+    }
+
+    final emptyUser = userMessage('u-empty', '', parts: const []);
+
+    test('regenerate on a final empty sent user', () async {
+      await expectFullNoOp(
+        Conversation(messages: [emptyUser]),
+        (session) => session.regenerate(),
+      );
+    });
+
+    test('resend of an empty failed user', () async {
+      await expectFullNoOp(
+        Conversation(
+          messages: [
+            userMessage(
+              'u-empty',
+              '',
+              parts: const [],
+              status: MessageStatus.failed,
+            ),
+          ],
+        ),
+        (session) => session.resend('u-empty'),
+      );
+    });
+
+    test('regenerate of a complete reply whose nearest user anchor is '
+        'empty', () async {
+      await expectFullNoOp(
+        Conversation(
+          messages: [emptyUser, assistantMessage('a-1', 'take one')],
+        ),
+        (session) => session.regenerate(),
+      );
+    });
+
+    test('regenerate of an interrupted reply whose nearest user anchor is '
+        'empty (recover-before-rebill)', () async {
+      await expectFullNoOp(
+        Conversation(
+          messages: [
+            emptyUser,
+            assistantMessage(
+              'a-1',
+              'half an ans',
+              status: MessageStatus.interrupted,
+              attemptKey: 'leg-key-1',
+            ),
+          ],
+        ),
+        (session) => session.regenerate(),
+      );
+    });
+
+    test('editAndResend still turns it into a real turn', () async {
+      final fake = FakeChatBackend()..reply('answered');
+      final session = makeSession(
+        backend: fake,
+        time: FakeTime(),
+        uuid: SequentialUuid(),
+        history: Conversation(messages: [emptyUser]),
+      );
+      await session.editAndResend('u-empty', 'now with content');
+      await waitForState(session, (s) => s is Done);
+
+      final request = capturedRequestsOf(fake).single;
+      expect(request.messages.map((m) => m.id), contains('u-empty'));
+      expect(visibleText(request.messages.first), 'now with content');
+      expect(visibleText(session.snapshot.messages.last), 'answered');
+    });
+  });
+
   group('checkpoint discipline', () {
     test('the snapshot given to the checkpoint already contains the new '
         'Message and key', () async {

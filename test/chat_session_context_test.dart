@@ -66,6 +66,41 @@ void main() {
     },
   );
 
+  test('an empty user Message is storage/UI-only: never on the wire, kept '
+      'unchanged in the snapshot', () async {
+    final fake = FakeChatBackend()..reply('ok');
+    final session = makeSession(
+      backend: fake,
+      time: FakeTime(),
+      history: Conversation(
+        messages: [
+          userMessage('u-1', 'first'),
+          assistantMessage('a-1', 'answer'),
+          // A legal Conversation entry with no provider-effective content.
+          userMessage('u-empty', '', parts: const []),
+        ],
+      ),
+    );
+    await session.send('new turn');
+    await waitForState(session, (s) => s is Done);
+
+    final ids = capturedRequestsOf(
+      fake,
+    ).single.messages.map((m) => m.id).toList();
+    expect(ids, [
+      'u-1',
+      'a-1',
+      ids.last,
+    ], reason: 'the empty user Message is wire-excluded; order kept');
+    expect(ids, isNot(contains('u-empty')));
+
+    final kept = session.snapshot.messages.firstWhere((m) => m.id == 'u-empty');
+    expect(kept.role, MessageRole.user);
+    expect(kept.status, MessageStatus.sent);
+    expect(kept.attemptKey, 'key-u-empty');
+    expect(kept.parts, isEmpty, reason: 'storage is not rewritten by assembly');
+  });
+
   test('the idempotency key never rides in the body, only on the request '
       'field', () async {
     final fake = FakeChatBackend()..reply('ok');

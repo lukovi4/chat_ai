@@ -322,8 +322,8 @@ name/schema; constructor/setter, §3/§5).
 |---|---|---|---|---|---|
 | `send` | ✅ → Sending | no-op | no-op | no-op | ✅ → Sending |
 | `send` with empty text **and** no images | no-op everywhere (nothing to send) | | | | |
-| `regenerate` | ✅ for a bot reply, or for the final `sent` user Message with no assistant after it; else no-op | no-op | no-op | no-op | same rule |
-| `resend(id)` | ✅ if `id` is a `failed` **user** Message **and the last Message of the conversation**; an older `failed` user with later Messages is a full no-op (no truncation, no state change, no key/checkpoint/backend) | no-op | no-op | no-op | same rule |
+| `regenerate` | ✅ for a bot reply, or for the final `sent` user Message with no assistant after it; else no-op. A full no-op when the user Message it would answer has **no parts** | no-op | no-op | no-op | same rule |
+| `resend(id)` | ✅ if `id` is a `failed` **user** Message **and the last Message of the conversation**; an older `failed` user with later Messages is a full no-op (no truncation, no state change, no key/checkpoint/backend). A Message with **no parts** is likewise a full no-op | no-op | no-op | no-op | same rule |
 | `editAndResend(id, …)` | ✅ if `id` is a user Message, else no-op | no-op | no-op | no-op | same rule |
 | `cancel` | no-op | ✅ → Cancelled (no bot Message created) | ✅ → Cancelled (keep partial) | ✅ → Cancelled (keep partial) | no-op — **Done wins** the race (CONTEXT.md §Cancel) |
 
@@ -331,6 +331,19 @@ The private preprocessing gate is busy but is not `Sending`: all public commands
 are no-op there except `dispose()`. A `failed` user Message is recovered only by
 `resend(id)`; pre-token recovery by `regenerate()` applies only to a `sent` final
 user Message with no following assistant Message.
+
+**Empty user Messages are never a provider anchor.** A user Message with no
+parts is a legal storage/UI-only entry (§5) with no provider-effective content:
+it never rides the wire (§6), so recovering from it would silently ask the
+provider to answer the *previous* user turn. Every recovery path that would
+answer such a Message — `regenerate()` of the final `sent` user, `resend(id)`,
+and `regenerate()` of a reply whose nearest preceding user Message is empty (in
+every backend mode) — is a **full** no-op: the Conversation and its statuses are
+unchanged, no `attemptKey`/`replyId` is minted, no checkpoint runs and no
+backend method is called. `editAndResend(id, …)` is the way forward — it
+replaces the parts with new, non-empty content. The rule is structural
+(`parts.isEmpty`); an empty or whitespace-only `TextPart` is ordinary content
+and is never interpreted.
 
 ### Tool resolver edge rules
 
@@ -468,6 +481,12 @@ sealed ContentPart =
   **inside it**, so history can never separate a call from its result (and
   Context Trimming, which drops whole Messages, cannot either).
 
+- **An empty `parts` list is legal on a user Message** — a storage/UI-only
+  entry the app keeps in its timeline although it carries nothing for the
+  provider. It stays in the Conversation untouched, but it is never
+  provider-effective: it is excluded from the assembled context (§6) and is
+  never a recovery anchor (§4). The rule is structural (`parts.isEmpty`); an
+  empty or whitespace-only `TextPart` is ordinary content.
 - **Message `id`** exists so `resend(id)` / `editAndResend(id, …)` have an
   address, and so the app can key its own UI/DB rows. The Core mints it; a
   loaded history must carry it (it round-trips through the app's storage).
@@ -606,6 +625,12 @@ CONTEXT.md §Context Assembly — filtering pinned here):
 
 - **`failed` user Messages are excluded** — they never reached the bot; their
   only path into the context is a successful `resend`.
+- **User Messages with no parts are excluded** — they are legal storage/UI-only
+  entries (§5) with no provider-effective content, and no provider accepts an
+  empty user content list. They stay in storage/UI unchanged; an adapter that
+  still receives one on its wire rejects the request (the Firebase wire:
+  `400 invalid-request`, before any claim or provider call), and every provider
+  translator fails closed rather than building an empty user item.
 - **`interrupted` assistant partials are included** — the user saw that text,
   it is real conversation (the ChatGPT/Claude stop-button behaviour).
 - **Empty `complete` assistant Messages are dropped from the wire** (providers

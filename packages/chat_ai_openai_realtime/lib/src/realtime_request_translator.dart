@@ -92,6 +92,11 @@ Map<String, dynamic> _systemItem(Message message) {
 
 /// A user Message maps to one user message item: `input_text` and
 /// `input_image` (`data:image/jpeg;base64,...`) parts in source order.
+///
+/// Fails closed on empty content: an empty user Message is a legal
+/// storage/UI-only entry of the Conversation that the Core never assembles
+/// into a [ChatRequest], so reaching this point would mean building a
+/// `content: []` item — never a valid provider payload.
 Map<String, dynamic> _userItem(Message message) {
   final content = <Map<String, dynamic>>[];
   for (final part in message.parts) {
@@ -108,6 +113,9 @@ Map<String, dynamic> _userItem(Message message) {
       default:
         throw StateError('unexpected user content part');
     }
+  }
+  if (content.isEmpty) {
+    throw StateError('user Message must contain at least one content part');
   }
   return <String, dynamic>{
     'type': 'message',

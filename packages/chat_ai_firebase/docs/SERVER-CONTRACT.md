@@ -113,6 +113,15 @@ support vision, streaming, function calling and the stateless round-trip above.
 Configured models must also support provider strict Tool schemas; otherwise the
 tier fails deployment.
 
+**A user Message never maps to empty provider content.** Translation of a user
+Message that produces no content part fails closed with a plain local `Error`
+("user Message must contain at least one content part") instead of building a
+`{ "role": "user", "content": [] }` input item — the request is never
+dispatched. On the HTTP path ingress validation (§5) already rejected it; the
+guard is what protects a `ChatRequest` handed straight to the public
+`runChatReply`, which ends as the existing local `request-translation` error
+before any provider call.
+
 **System mapping is deterministic.** The proxy builds provider instructions from
 `BotProfile.systemPrompt` first and persisted `system` Messages in chronological
 order, then removes those Messages from ordinary history. OpenAI receives that
@@ -250,6 +259,15 @@ The proxy validates the version before creating any idempotency/usage record or
 calling a provider. Unsupported/missing versions return
 `426 {"cause":"upstream","detail":"unsupported-wire-version"}`. Every successful
 SSE response carries `X-Chat-AI-Wire-Version: 1`.
+
+**A `user` Message with an empty `parts` list is an invalid request.** Such a
+Message is legal in the client's stored `Conversation` (a storage/UI-only entry,
+V1_SPEC §5) but carries nothing for the provider, so the Core never assembles it
+into the wire (V1_SPEC §6). Ingress validation therefore rejects the request as
+`400 {"cause":"upstream","detail":"invalid-request"}` — with the other wire
+validation, before the idempotency claim, entitlement/quota and any provider
+call. The rule is structural (`parts.length === 0`); an empty or whitespace-only
+text part is ordinary content and is never interpreted.
 
 ## 6. Idempotency (double-billing protection)
 

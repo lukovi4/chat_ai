@@ -199,6 +199,44 @@ void main() {
       expect((wire.single['content']! as List).length, 1);
     });
 
+    test('a user that maps to no content is dropped; an empty TextPart is '
+        'kept', () {
+      final conversation = Conversation(
+        messages: <Message>[
+          // Storage/UI-only: nothing to map at all.
+          _user('u-empty', const <ContentPart>[]),
+          // Non-empty parts that carry no supported content.
+          _user('u-opaque', <ContentPart>[
+            ContentPart.providerOpaque('openai', Uint8List.fromList(<int>[7])),
+          ]),
+          // An empty string is ordinary content and is never interpreted.
+          _user('u-blank', <ContentPart>[ContentPart.text('')]),
+        ],
+      );
+      final before = jsonEncode(conversation.toJson());
+
+      final wire = prepareInitialHistory(conversation);
+
+      expect(wire.length, 1, reason: 'both empty-mapping users are dropped');
+      expect(wire.single['role'], 'user');
+      final content = wire.single['content']! as List;
+      expect(content.length, 1);
+      expect(content.single, <String, Object?>{
+        'type': 'input_text',
+        'text': '',
+      });
+      expect(
+        wire.any((e) => (e['content'] as List?)?.isEmpty ?? false),
+        isFalse,
+        reason: 'no item with an empty content list is ever built',
+      );
+      expect(
+        jsonEncode(conversation.toJson()),
+        before,
+        reason: 'the Conversation is never mutated',
+      );
+    });
+
     test('an interrupted assistant is preserved', () {
       final conversation = Conversation(
         messages: <Message>[

@@ -38,6 +38,11 @@ Content-Type: application/json
   claim or provider call.
 - An `ImagePart` rides as `{"type": "image", "mimeType": "image/jpeg",
   "data": "<base64>"}` — already resized by the Core.
+- A `user` Message with `"parts": []` is **invalid on the wire**. It is legal in
+  the app's stored `Conversation` (a storage/UI-only entry, V1_SPEC §5) but has
+  no provider-effective content, so the Core never assembles it (V1_SPEC §6).
+  The rule is structural (empty array); a `{"type":"text","text":""}` part is
+  ordinary content.
 
 ## Response — pre-stream failures (HTTP status, no stream yet)
 
@@ -52,6 +57,11 @@ payload limit: **10 MB**).
 Unsupported `wireVersion` is
 `426 {"cause":"upstream","detail":"unsupported-wire-version"}`. It creates
 no idempotency/usage record and never calls a provider.
+
+A `user` Message with `"parts": []` is rejected as
+`400 {"cause":"upstream","detail":"invalid-request"}` — the existing
+malformed-request verdict, no new code — likewise before any idempotency
+claim, entitlement/quota hook or provider call.
 
 `FirebaseChatBackend` verifies HTTP `X-Chat-AI-Wire-Version: 1` before
 yielding `Accepted`; missing/mismatched version becomes

@@ -213,6 +213,15 @@ final session = OpenAIRealtimeVoiceSession(
   nothing, and all local `Message.id` / statuses / timestamps / attempt keys. An
   `interrupted` assistant is preserved. There are no audio or file references in
   v1.
+- **A user message that maps to no supported content is not sent** — both
+  `parts: []` and an opaque-only user message. The message stays in your
+  `Conversation` untouched; only the `conversation.item.create` for it is
+  skipped, and the remaining history keeps its order. A `TextPart('')` (or a
+  whitespace-only one) is ordinary content and is still sent as an `input_text`
+  — the rule is the actual mapping result, not string interpretation. This is a
+  **drop, not an exception**: `prepareInitialHistory` is itself the filtering
+  layer over your stored `Conversation`, so a stored message with nothing to
+  say never fails the session start.
 - **One item at a time:** each item is sent as a `conversation.item.create` and
   the next one waits for a well-formed `conversation.item.added` — the only
   acknowledgement (the trailing `conversation.item.done` confirms nothing). No

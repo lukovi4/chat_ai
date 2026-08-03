@@ -195,7 +195,16 @@ function opaqueToInputItem(base64Data: string): InputItem {
     : validateReasoningItem(decoded);
 }
 
-/** Maps a user Message's parts to Responses input content (text + image). */
+/**
+ * Maps a user Message's parts to Responses input content (text + image).
+ *
+ * Fails closed on an empty result: an empty user Message is a legal
+ * storage/UI-only entry of the client's Conversation that the Core never
+ * assembles into the wire and ingress validation rejects, so reaching this
+ * point means a `{ role:'user', content: [] }` item would be built — never a
+ * valid provider request. The message is stable and carries no Message id or
+ * user content.
+ */
 function userContent(message: WireMessage): InputContent[] {
   const content: InputContent[] = [];
   for (const part of message.parts) {
@@ -214,6 +223,9 @@ function userContent(message: WireMessage): InputContent[] {
         // A validated user Message carries only text/image parts (V1_SPEC §5).
         throw new Error(`unexpected user content part: ${part.type}`);
     }
+  }
+  if (content.length === 0) {
+    throw new Error('user Message must contain at least one content part');
   }
   return content;
 }

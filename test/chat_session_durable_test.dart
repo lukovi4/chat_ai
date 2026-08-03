@@ -1013,6 +1013,40 @@ void main() {
       },
     );
 
+    test('an empty user anchor is a full no-op: no admission at all', () async {
+      final backend = ManualServerManagedBackend();
+      final session = makeSession(
+        backend: backend,
+        uuid: SequentialUuid(),
+        history: Conversation(
+          messages: [
+            // Storage/UI-only: no provider-effective content, so the
+            // server-managed regenerate (which takes the fresh-admission
+            // path for an interrupted reply too) never admits anything.
+            userMessage('u-empty', '', parts: const []),
+            assistantMessage(
+              'a-1',
+              'partial',
+              status: MessageStatus.interrupted,
+            ),
+          ],
+        ),
+      );
+      addTearDown(session.dispose);
+      final before = session.snapshot.toJson();
+
+      await session.regenerate();
+      await Future<void>.delayed(Duration.zero);
+
+      expect(backend.admittedReplyIds, isEmpty);
+      expect(backend.requests, isEmpty);
+      expect(backend.snapshots, isEmpty);
+      expect(backend.sendCalls, 0);
+      expect(backend.attachedReplyIds, isEmpty);
+      expect(session.snapshot.toJson(), before);
+      expect(session.state, isA<Idle>());
+    });
+
     test(
       'dispose only detaches; cancel remotely cancels at most once',
       () async {

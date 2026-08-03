@@ -31,10 +31,15 @@ import 'package:chat_ai/chat_ai.dart';
 /// - a `user` Message with status `sending` is rejected;
 /// - an `assistant` Message with status `streaming` is rejected.
 ///
-/// Filtering (never an error):
+/// Filtering (never an error — this is storage-history filtering, not a
+/// validation failure):
 /// - a `failed` user Message is excluded from sending;
 /// - `ProviderOpaquePart`, an unmatched (incomplete) `ToolCallPart` and an
 ///   orphan `ToolResultPart` are dropped;
+/// - a user Message that maps to nothing after filtering is dropped — both an
+///   empty `parts` list and parts that carry no supported content (e.g. an
+///   opaque-only user Message); it stays in the Conversation and no
+///   `conversation.item.create` is sent for it;
 /// - an `interrupted` assistant Message is preserved;
 /// - an assistant Message that maps to nothing after filtering is dropped;
 /// - local `Message.id`, statuses, timestamps and attempt keys are never sent.
@@ -64,7 +69,13 @@ List<Map<String, Object?>> prepareInitialHistory(Conversation conversation) {
           // A failed user Message is not an error, but it is excluded.
           break;
         }
-        items.add(_userItem(message));
+        // A user that maps to nothing is dropped, exactly like such an
+        // assistant: no item is sent for it and the next Message follows in
+        // source order.
+        final item = _userItem(message);
+        if (item != null) {
+          items.add(item);
+        }
       case MessageRole.assistant:
         if (message.status == MessageStatus.streaming) {
           throw ArgumentError.value(
@@ -107,7 +118,13 @@ Map<String, Object?> _systemItem(Message message) {
 /// A user Message maps to one user item: `input_text` and `input_image`
 /// (`data:image/jpeg;base64,...`) parts in source order. Opaque parts are
 /// dropped; audio/file references do not exist in v1.
-Map<String, Object?> _userItem(Message message) {
+///
+/// Returns `null` when the mapping produced no content at all — an empty
+/// `parts` list, or parts that carry nothing supported (an opaque-only user
+/// Message). A `content: []` item is never built: the Message is simply not
+/// sent. A `TextPart('')` is ordinary content and still maps to an
+/// `input_text` with an empty string.
+Map<String, Object?>? _userItem(Message message) {
   final content = <Map<String, Object?>>[];
   for (final part in message.parts) {
     switch (part) {
@@ -123,6 +140,9 @@ Map<String, Object?> _userItem(Message message) {
       default:
         break; // tool parts never ride on a user Message
     }
+  }
+  if (content.isEmpty) {
+    return null;
   }
   return <String, Object?>{
     'type': 'message',

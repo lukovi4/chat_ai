@@ -97,6 +97,11 @@ function parseMessage(raw: unknown): WireMessage | null {
     if (part === null) return null;
     parts.push(part);
   }
+  // A user Message with no content part is a legal storage/UI-only entry of
+  // the client's Conversation, but it carries nothing for the provider and
+  // the Core never assembles it into the wire (V1_SPEC §6). On the wire it is
+  // therefore an invalid request — rejected here, before the claim.
+  if (raw.role === 'user' && parts.length === 0) return null;
 
   const message: WireMessage = {
     id: raw.id,

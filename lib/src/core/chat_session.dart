@@ -474,6 +474,10 @@ class ChatSession {
   /// explicit `409`/`410` fallback); a `complete` reply starts a fresh
   /// billable Attempt immediately.
   ///
+  /// A full no-op when the user Message it would answer has no parts: such a
+  /// Message is storage/UI-only and never rides the wire, so regenerating
+  /// from it would answer the PREVIOUS user turn (V1_SPEC §4).
+  ///
   /// With a [ServerManagedDurableChatBackend] EVERY regenerate is that fresh
   /// Attempt: a `replyId` is admitted at most once and a repeated `admitReply`
   /// of it means "transport duplicate — join the existing Job", so an explicit
@@ -490,7 +494,9 @@ class ChatSession {
   /// changes state, mints a key or calls the checkpoint/backend. The legal
   /// case runs under the Message's persisted `attemptKey` (the safe side of
   /// the Retry Boundary); an explicit `409`/`410` gets its single automatic
-  /// fresh-key re-run.
+  /// fresh-key re-run. A Message with no parts is likewise a full no-op —
+  /// it never rides the wire, so only [editAndResend] can turn it into a
+  /// real turn (V1_SPEC §4).
   Future<void> resend(String messageId) async {
     await _resend(messageId);
   }
@@ -744,6 +750,20 @@ class ChatSession {
       // Recover-before-rebill: repeat the interrupted leg under its
       // persisted key; only an explicit 409/410 falls back to a fresh key.
       // A server-managed reply is deliberately excluded — see below.
+      //
+      // The empty-anchor guard (V1_SPEC §4/§6): a user Message with no parts
+      // is a legal storage/UI-only entry that never rides the wire, so the
+      // repeated leg would silently ask the provider to answer the PREVIOUS
+      // user turn. Checked BEFORE any mutation — the command stays a full
+      // no-op (no state, no key, no checkpoint, no dispatch).
+      final recoveredFrom = _messages.lastIndexWhere(
+        (message) => message.role == MessageRole.user,
+        _messages.length - 2,
+      );
+      if (recoveredFrom >= 0 && _messages[recoveredFrom].parts.isEmpty) {
+        _debugNoOp('regenerate', 'the user Message it answers has no content');
+        return ChatCommandDisposition.noOp;
+      }
       _busy = true;
       _updateMessage(
         last.id,
@@ -792,6 +812,11 @@ class ChatSession {
         _debugNoOp('regenerate', 'no user Message to regenerate from');
         return ChatCommandDisposition.noOp;
       }
+      // The empty-anchor guard, before the truncation and the fresh key.
+      if (_messages[anchorIndex].parts.isEmpty) {
+        _debugNoOp('regenerate', 'the anchor user Message has no content');
+        return ChatCommandDisposition.noOp;
+      }
       _busy = true;
       final epoch = _epoch;
       _messages.removeLast();
@@ -827,6 +852,12 @@ class ChatSession {
       // regenerate that follows is a NEW user-initiated logical reply: it
       // mints a fresh `attemptKey` here, and the admission after it mints a
       // fresh `replyId`.
+      //
+      // The empty-anchor guard, before the status change and the key.
+      if (last.parts.isEmpty) {
+        _debugNoOp('regenerate', 'the user Message has no content');
+        return ChatCommandDisposition.noOp;
+      }
       _busy = true;
       _updateMessage(
         last.id,
@@ -872,6 +903,14 @@ class ChatSession {
       // checkpoint/backend; restarting from an earlier point is the explicit
       // truncate-and-resend mechanism (editAndResend).
       _debugNoOp('resend', 'not the last Message of the conversation');
+      return ChatCommandDisposition.noOp;
+    }
+    // The empty-anchor guard, before the status change: an empty user Message
+    // never rides the wire, so resending it would ask the provider to answer
+    // the PREVIOUS user turn. `editAndResend` stays the way out — it replaces
+    // the parts with new, non-empty content.
+    if (_messages[index].parts.isEmpty) {
+      _debugNoOp('resend', 'the user Message has no content');
       return ChatCommandDisposition.noOp;
     }
     _busy = true;

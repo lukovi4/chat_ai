@@ -259,4 +259,22 @@ void main() {
     expect(payload, isNot(contains('2026-07-16')));
     expect(payload, isNot(contains('"status"')));
   });
+
+  test('an empty user Message fails closed — no content: [] item is ever '
+      'built', () {
+    Map<String, dynamic>? built;
+    expect(
+      () => built = buildEvent(
+        chatRequest(
+          messages: [
+            message(MessageRole.user, [ContentPart.text('hi')], id: 'u1'),
+            // Storage/UI-only: the Core never assembles it into a request.
+            message(MessageRole.user, const [], id: 'u2'),
+          ],
+        ),
+      ),
+      throwsStateError,
+    );
+    expect(built, isNull, reason: 'the payload is never produced');
+  });
 }
